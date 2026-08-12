@@ -181,7 +181,7 @@ def get_story_from_mongodb():
         story = collection.find_one_and_update(
             query,
             {"$set": {"status": "PROCESSING"}},
-            sort=[("created_at", 1), ("story_id", 1)],
+            sort=[("story_no", 1), ("story_id", 1)],
             return_document=ReturnDocument.AFTER
         )
 
