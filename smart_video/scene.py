@@ -184,13 +184,24 @@ def _apply_ken_burns(
 
 def create_scene(
     scene,
-    index
+    index,
+    part_no=1
 ):
 
+    part_no = int(part_no)
     scene_number = scene.get(
         "scene_number",
         index + 1
     )
+
+    part_dir = os.path.join(
+        "parts",
+        f"part_{part_no:02d}"
+    )
+    image_dir = os.path.join(part_dir, "images")
+    audio_dir = os.path.join(part_dir, "audio")
+    os.makedirs(image_dir, exist_ok=True)
+    os.makedirs(audio_dir, exist_ok=True)
 
     print(
         f"\n🎬 Scene {scene_number}",
@@ -285,7 +296,10 @@ def create_scene(
     # --------------------------------------------------------
 
     audio_path = (
-        f"audio/a_{index + 1}.mp3"
+        os.path.join(
+            audio_dir,
+            f"a_{scene_number:03d}.mp3"
+        )
     )
 
     voice, word_timings = generate_voice(
@@ -465,9 +479,10 @@ def create_scene(
             )
 
         img_path = (
-            f"images/"
-            f"s_{scene_number}_"
-            f"{prompt_index}.png"
+            os.path.join(
+                image_dir,
+                f"s_{scene_number:03d}_{prompt_index:02d}.png"
+            )
         )
 
         print(

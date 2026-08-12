@@ -459,7 +459,7 @@ def _split_title_for_design(title):
         "center",
     )
 
-def create_title_card(title, duration=TITLE_CARD_DURATION):
+def create_title_card(title, duration=TITLE_CARD_DURATION, part_no=None):
     """
     Create the opening title page using the EXACT supplied poster artwork.
 
@@ -467,6 +467,8 @@ def create_title_card(title, duration=TITLE_CARD_DURATION):
     Everything else remains based on the supplied design.
     """
     original_title = clean_tts_text(title) or "Untitled Story"
+    if part_no is not None:
+        part_no = int(part_no)
     title = _normalize_title(original_title)
 
     if title != original_title:
@@ -765,6 +767,46 @@ def create_title_card(title, duration=TITLE_CARD_DURATION):
             )
 
     # ------------------------------------------------------------
+    # Dynamic part number
+    # ------------------------------------------------------------
+    if part_no is not None:
+        part_text = f"भाग {part_no}"
+        part_font = _fit_font_for_text(
+            part_text,
+            int(width * 0.42),
+            58,
+            bold=True,
+            max_height=int(height * 0.055),
+            min_size=28,
+        )
+        part_bbox = draw.textbbox(
+            (0, 0),
+            part_text,
+            font=part_font,
+            stroke_width=2,
+        )
+        part_width = part_bbox[2] - part_bbox[0]
+        part_height = part_bbox[3] - part_bbox[1]
+        part_y = int(height * 0.515)
+        if part_y + part_height > int(height * 0.585):
+            part_y = int(height * 0.505)
+
+        _draw_3d_title(
+            draw,
+            center_x,
+            part_y,
+            part_text,
+            part_font,
+            (255, 215, 95),
+            align="center",
+        )
+
+        print(
+            f"🏷️ TITLE PART: {part_text}",
+            flush=True,
+        )
+
+    # ------------------------------------------------------------
     # Keep the subtitle plaque from the supplied design.
     #
     # It already exists in the template image, so we do NOT redraw it.
@@ -808,7 +850,9 @@ def create_title_card(title, duration=TITLE_CARD_DURATION):
             fill=(245, 245, 240)
         )
 
-    path = "images/_title_card.png"
+    title_dir = os.path.join("parts", f"part_{part_no:02d}") if part_no is not None else "images"
+    os.makedirs(title_dir, exist_ok=True)
+    path = os.path.join(title_dir, "title_card.png")
 
     img.save(
         path,

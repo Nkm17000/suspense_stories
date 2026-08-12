@@ -1,4 +1,4 @@
-name: Generate Video
+name: Generate Long Story Video
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
       - main
 
   schedule:
-    - cron: "3 * 2  * *"
+    - cron: "0 3 * * *"
 
 jobs:
   build:
@@ -18,268 +18,90 @@ jobs:
       contents: read
 
     env:
-      # --------------------------------------------------
-      # MongoDB / API
-      # --------------------------------------------------
       MONGODB_URI: ${{ secrets.MONGODB_URI }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-
-      # --------------------------------------------------
-      # Facebook Page
-      # --------------------------------------------------
       FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
 
-      # --------------------------------------------------
-      # Final Like / Subscribe page
-      # --------------------------------------------------
       CTA_URL: "https://www.facebook.com/thesmartlearninglab"
 
-      # --------------------------------------------------
-      # Logo configuration
-      # --------------------------------------------------
       LOGO_PATH: "logo.png"
       LOGO_SIZE: "125"
       LOGO_MARGIN: "18"
 
-      # --------------------------------------------------
-      # Video configuration
-      # --------------------------------------------------
       END_CARD_DURATION: "5"
-
-      # IMPORTANT:
-      # Title page should be 2 seconds
       TITLE_CARD_DURATION: "2"
-
-      # --------------------------------------------------
-      # Title page template
-      # --------------------------------------------------
       TITLE_TEMPLATE_PATH: "assets/title_page_template.png"
 
     steps:
-
-      # ==================================================
-      # 1. Checkout
-      # ==================================================
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ==================================================
-      # 2. Setup Python
-      # ==================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
 
-      # ==================================================
-      # 3. Verify Python
-      # ==================================================
       - name: Verify Python
         run: |
-          echo "=========================================="
-          echo "Python"
-          echo "=========================================="
-
           python --version
           python -m pip --version
           pwd
 
-      # ==================================================
-      # 4. Install system dependencies
-      # ==================================================
       - name: Install system dependencies
         run: |
           sudo apt-get update
-
-          sudo apt-get install -y \
-            ffmpeg \
-            fonts-noto-core \
-            fonts-noto-extra \
-            fontconfig
-
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-extra fontconfig
           fc-cache -f -v
 
-      # ==================================================
-      # 5. Verify FFmpeg
-      # ==================================================
       - name: Verify FFmpeg
         run: |
-          echo "=========================================="
-          echo "FFmpeg"
-          echo "=========================================="
-
           ffmpeg -version | head -5
           ffprobe -version | head -5
 
-      # ==================================================
-      # 6. Verify Hindi fonts
-      # ==================================================
       - name: Verify Hindi fonts
         run: |
-          echo "=========================================="
-          echo "Checking Devanagari fonts"
-          echo "=========================================="
-
-          echo ""
-          echo "Available Hindi fonts:"
           fc-list :lang=hi family file | head -30
+          find /usr/share/fonts -iname "*Devanagari*" | head -30
 
-          echo ""
-          echo "Noto Devanagari fonts:"
-          find /usr/share/fonts \
-            -iname "*Devanagari*" \
-            | head -30
-
-      # ==================================================
-      # 7. Verify project structure
-      # ==================================================
       - name: Verify project structure
         run: |
-          echo "=========================================="
-          echo "Project structure"
-          echo "=========================================="
-
-          echo ""
-          echo "Current directory:"
           pwd
-
-          echo ""
-          echo "Root files:"
           ls -lah
-
-          echo ""
-          echo "Python files:"
           find . -maxdepth 3 -type f -name "*.py" -print | sort
+          ls -lah smart_video
+          ls -lah assets
 
-          echo ""
-          echo "smart_video package:"
-
-          if [ -d "smart_video" ]; then
-            ls -lah smart_video
-          else
-            echo "⚠️ smart_video directory not found"
-          fi
-
-          echo ""
-          echo "Assets:"
-
-          if [ -d "assets" ]; then
-            ls -lah assets
-          else
-            echo "⚠️ assets directory not found"
-          fi
-
-      # ==================================================
-      # 8. Verify logo
-      # ==================================================
-      - name: Verify Smart Learning Lab logo
+      - name: Verify logo
         run: |
-          echo "=========================================="
-          echo "Checking logo"
-          echo "=========================================="
+          test -f "$LOGO_PATH"
+          ls -lh "$LOGO_PATH"
 
-          if [ -f "$LOGO_PATH" ]; then
-            echo "✅ logo.png found"
-            ls -lh "$LOGO_PATH"
-            file "$LOGO_PATH"
-          else
-            echo "❌ logo.png NOT found"
-            exit 1
-          fi
-
-      # ==================================================
-      # 9. Verify title-page template
-      # ==================================================
       - name: Verify title page template
         run: |
-          echo "=========================================="
-          echo "Checking title page template"
-          echo "=========================================="
+          test -f "$TITLE_TEMPLATE_PATH"
+          ls -lh "$TITLE_TEMPLATE_PATH"
 
-          if [ -f "$TITLE_TEMPLATE_PATH" ]; then
-            echo "✅ Title page template found"
-            ls -lh "$TITLE_TEMPLATE_PATH"
-            file "$TITLE_TEMPLATE_PATH"
-          else
-            echo "❌ Title page template NOT found"
-            echo "Expected: $TITLE_TEMPLATE_PATH"
-            ls -lah assets 2>/dev/null || true
-            exit 1
-          fi
-
-      # ==================================================
-      # 10. Install Python dependencies
-      # ==================================================
       - name: Install dependencies
         run: |
-          echo "=========================================="
-          echo "Installing Python dependencies"
-          echo "=========================================="
-
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # ==================================================
-      # 11. Verify Python packages
-      # ==================================================
       - name: Verify Python packages
         run: |
           python - <<'PY'
-          import edge_tts
-          import pymongo
-          import requests
-          import numpy
-          import nest_asyncio
-          import PIL
-          import moviepy
-          import qrcode
-
-          from PIL import Image
-
-          print("==========================================")
-          print("Python packages verified")
-          print("==========================================")
-
-          print("edge_tts     :", "OK")
-          print("pymongo      :", "OK")
-          print("requests     :", "OK")
-          print("numpy        :", "OK")
-          print("nest_asyncio :", "OK")
+          import edge_tts, pymongo, requests, numpy, nest_asyncio, PIL, moviepy, qrcode
+          print("edge_tts     : OK")
+          print("pymongo      : OK")
+          print("requests     : OK")
+          print("numpy        : OK")
+          print("nest_asyncio : OK")
           print("Pillow       :", PIL.__version__)
           print("MoviePy      :", moviepy.__version__)
-          print("qrcode       :", "OK")
-
-          print("")
-          print("Pillow compatibility:")
-          print(
-              "Image.ANTIALIAS:",
-              hasattr(Image, "ANTIALIAS")
-          )
-
-          print(
-              "Image.Resampling:",
-              hasattr(Image, "Resampling")
-          )
-
-          print("==========================================")
+          print("qrcode       : OK")
           PY
 
-      # ==================================================
-      # 12. Verify Edge TTS
-      # ==================================================
-      - name: Verify Edge TTS
-        run: |
-          echo "=========================================="
-          echo "Edge TTS"
-          echo "=========================================="
-
-          edge-tts --version
-
-      # ==================================================
-      # 13. Test Hindi TTS
-      # ==================================================
       - name: Test Hindi TTS
         run: |
           python - <<'PY'
@@ -287,35 +109,17 @@ jobs:
           import edge_tts
 
           async def main():
-
-              text = (
-                  "एक विशाल पहाड़ी जंगल में "
-                  "अर्जुन नाम का एक लकड़हारा रहता था।"
-              )
-
               communicate = edge_tts.Communicate(
-                  text=text,
+                  text="एक विशाल पहाड़ी जंगल में अर्जुन नाम का एक लकड़हारा रहता था।",
                   voice="hi-IN-SwaraNeural",
-                  rate="-15%"
+                  rate="-15%",
               )
-
               await communicate.save("test_hindi.mp3")
 
           asyncio.run(main())
-
-          print("✅ Hindi TTS test completed successfully")
           PY
+          test -s test_hindi.mp3
 
-          if [ ! -s "test_hindi.mp3" ]; then
-            echo "❌ Hindi TTS file was not created"
-            exit 1
-          fi
-
-          ls -lh test_hindi.mp3
-
-      # ==================================================
-      # 14. Test English TTS
-      # ==================================================
       - name: Test English TTS
         run: |
           python - <<'PY'
@@ -323,256 +127,75 @@ jobs:
           import edge_tts
 
           async def main():
-
-              text = (
-                  "Deep inside a vast mountain forest, "
-                  "Arjun lived in a small cabin."
-              )
-
               communicate = edge_tts.Communicate(
-                  text=text,
+                  text="Deep inside a vast mountain forest, Arjun lived in a small cabin.",
                   voice="en-IN-NeerjaNeural",
-                  rate="-15%"
+                  rate="-15%",
               )
-
               await communicate.save("test_english.mp3")
 
           asyncio.run(main())
-
-          print("✅ English TTS test completed successfully")
           PY
+          test -s test_english.mp3
 
-          if [ ! -s "test_english.mp3" ]; then
-            echo "❌ English TTS file was not created"
-            exit 1
-          fi
-
-          ls -lh test_english.mp3
-
-      # ==================================================
-      # 15. Validate MongoDB
-      # ==================================================
       - name: Validate MongoDB URI
         run: |
-          if [ -z "$MONGODB_URI" ]; then
-            echo "❌ MONGODB_URI is EMPTY"
-            exit 1
-          else
-            echo "✅ MONGODB_URI is configured"
-          fi
+          test -n "$MONGODB_URI"
 
-      # ==================================================
-      # 16. Validate Groq
-      # ==================================================
-      - name: Validate Groq API key
-        run: |
-          if [ -z "$GROQ_API_KEY" ]; then
-            echo "⚠️ GROQ_API_KEY is EMPTY"
-          else
-            echo "✅ GROQ_API_KEY is configured"
-          fi
-
-      # ==================================================
-      # 17. Validate Facebook credentials
-      # ==================================================
       - name: Validate Facebook credentials
         run: |
-          echo "=========================================="
-          echo "Facebook Page configuration"
-          echo "=========================================="
+          test -n "$FB_PAGE_ID"
+          test -n "$FB_PAGE_ACCESS_TOKEN"
 
-          if [ -z "$FB_PAGE_ID" ]; then
-            echo "❌ FB_PAGE_ID is EMPTY"
-            exit 1
-          else
-            echo "✅ FB_PAGE_ID is configured"
-          fi
-
-          if [ -z "$FB_PAGE_ACCESS_TOKEN" ]; then
-            echo "❌ FB_PAGE_ACCESS_TOKEN is EMPTY"
-            exit 1
-          else
-            echo "✅ FB_PAGE_ACCESS_TOKEN is configured"
-          fi
-
-      # ==================================================
-      # 18. Validate CTA
-      # ==================================================
-      - name: Validate CTA URL
+      - name: Validate title configuration
         run: |
-          if [ -z "$CTA_URL" ]; then
-            echo "❌ CTA_URL is EMPTY"
-            exit 1
-          fi
-
-          echo "✅ CTA URL configured"
-          echo "$CTA_URL"
-
-      # ==================================================
-      # 19. Validate title configuration
-      # ==================================================
-      - name: Validate title page configuration
-        run: |
-          echo "=========================================="
-          echo "Title page configuration"
-          echo "=========================================="
-
+          test -f "$TITLE_TEMPLATE_PATH"
           echo "TITLE_TEMPLATE_PATH=$TITLE_TEMPLATE_PATH"
           echo "TITLE_CARD_DURATION=$TITLE_CARD_DURATION"
 
-          if [ ! -f "$TITLE_TEMPLATE_PATH" ]; then
-            echo "❌ Title template does not exist"
-            exit 1
-          fi
-
-          echo "✅ Title page configuration valid"
-
-      # ==================================================
-      # 20. Validate Python source
-      # ==================================================
       - name: Validate Python source
         run: |
           python -m py_compile main.py
-
-          if [ -d "smart_video" ]; then
-            for file in smart_video/*.py; do
-              if [ -f "$file" ]; then
-                echo "Checking $file"
-                python -m py_compile "$file"
-              fi
-            done
-          fi
-
-          if [ ! -f "facebook_upload.py" ]; then
-            echo "❌ facebook_upload.py not found"
-            exit 1
-          fi
-
+          for file in smart_video/*.py; do
+            python -m py_compile "$file"
+          done
           python -m py_compile facebook_upload.py
 
-          echo "✅ Python syntax validation successful"
-
-      # ==================================================
-      # 21. Run Video Generator
-      # ==================================================
-      - name: Run Video Generator
+      - name: Run Long Story Generator
         run: |
           echo "=========================================="
-          echo "Starting Smart Video Generator"
+          echo "Starting sequential long-story generator"
+          echo "Each part: build -> Facebook post -> next part"
           echo "=========================================="
-
-          pwd
-
           python main.py
 
-      # ==================================================
-      # 22. Verify generated video
-      # ==================================================
-      - name: Verify generated video
+      - name: Verify generated part videos
+        if: always()
         run: |
-          echo "=========================================="
-          echo "Checking generated video"
-          echo "=========================================="
+          echo "Generated MP4 files:"
+          find parts -type f -name "*.mp4" -print 2>/dev/null | sort || true
 
-          echo ""
-          echo "Current directory:"
-          pwd
+          echo "Part directories:"
+          find parts -maxdepth 2 -type d -print 2>/dev/null | sort || true
 
-          echo ""
-          echo "Root files:"
-          ls -lah
-
-          echo ""
-          echo "Searching for MP4 files:"
-          find "$GITHUB_WORKSPACE" \
-            -type f \
-            -name "*.mp4" \
-            -print
-
-          echo ""
-          echo "Checking final_video.mp4..."
-
-          if [ ! -f "final_video.mp4" ]; then
-            echo "❌ final_video.mp4 was not generated"
-
-            echo ""
-            echo "All generated files:"
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 5 \
-              -type f \
-              | sort
-
-            exit 1
-          fi
-
-          if [ ! -s "final_video.mp4" ]; then
-            echo "❌ final_video.mp4 is empty"
-            exit 1
-          fi
-
-          VIDEO_SIZE=$(stat -c%s "final_video.mp4")
-
-          echo "✅ final_video.mp4 generated"
-          echo "Size: $VIDEO_SIZE bytes"
-
-          ls -lh final_video.mp4
-
-          echo ""
-          echo "Video information:"
-
-          ffprobe \
-            -v error \
-            -show_entries format=duration,size \
-            -show_entries stream=codec_name,width,height \
-            -of default=noprint_wrappers=1 \
-            final_video.mp4
-
-      # ==================================================
-      # 23. Publish video to Facebook Page
-      # ==================================================
-      - name: Publish video to Facebook Page
-        run: |
-          echo "=========================================="
-          echo "Publishing video to Facebook Page"
-          echo "=========================================="
-
-          if [ ! -f "facebook_upload.py" ]; then
-            echo "❌ facebook_upload.py not found"
-            exit 1
-          fi
-
-          if [ ! -f "final_video.mp4" ]; then
-            echo "❌ final_video.mp4 not found"
-            exit 1
-          fi
-
-          echo "Running facebook_upload.py..."
-
-          python facebook_upload.py
-
-          echo "✅ Facebook publishing step completed"
-
-      # ==================================================
-      # 24. Upload final video artifact
-      # ==================================================
-      - name: Upload video
+      - name: Upload part videos
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: generated-video
-          path: final_video.mp4
-          if-no-files-found: error
+          name: generated-part-videos
+          path: parts/**/*.mp4
+          if-no-files-found: warn
           retention-days: 7
 
-      # ==================================================
-      # 25. Upload generated assets
-      # ==================================================
       - name: Upload generated assets
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: generated-assets
+          name: generated-long-story-assets
           path: |
-            audio/**
-            images/**
+            parts/**/images/**
+            parts/**/audio/**
+            parts/**/title_card.png
             test_hindi.mp3
             test_english.mp3
           if-no-files-found: warn

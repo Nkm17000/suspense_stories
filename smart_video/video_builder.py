@@ -1,235 +1,120 @@
-"""Build the final MP4 from title card, scenes, and CTA card."""
+"""Build one MP4 for one long-story part."""
+
+import os
 
 from moviepy.editor import concatenate_videoclips, vfx
 
-from .config import (
-    FPS,
-    CTA_URL,
-    END_CARD_DURATION,
-    TITLE_CARD_DURATION,
-)
+from .config import FPS, CTA_URL, END_CARD_DURATION, TITLE_CARD_DURATION
 from .title_card import create_title_card
 from .scene import create_scene
 from .end_card import create_end_card
 
 
-# ============================================================
-# BUILD VIDEO
-# ============================================================
-
-def build_video(
-    scenes,
-    title
-):
+def build_part_video(scenes, title, part_no, part_title=None):
+    """Build exactly one video from the scenes belonging to one part."""
     clips = []
+    transition_duration = 0.40
+    part_no = int(part_no)
+    part_dir = os.path.join("parts", f"part_{part_no:02d}")
+    os.makedirs(part_dir, exist_ok=True)
 
-    # --------------------------------------------------------
-    # Cinematic transition settings
-    # --------------------------------------------------------
-    #
-    # This is intentionally short. A 0.40s crossfade keeps the
-    # story continuous without making every scene look blurry.
-    #
-    TRANSITION_DURATION = 0.40
-
-    # --------------------------------------------------------
-    # Opening title page
-    # --------------------------------------------------------
-
-    print(
-        f"\n📖 Adding opening title page: {title}",
-        flush=True
-    )
-
-    title_clip = create_title_card(
-        title,
-        TITLE_CARD_DURATION
-    )
-
-    clips.append(
-        title_clip
-    )
-
-    # --------------------------------------------------------
-    # Story scenes
-    # --------------------------------------------------------
-
-    for i, scene in enumerate(scenes):
-
-        print(
-            f"\n🎬 Building story scene "
-            f"{i + 1}/{len(scenes)}",
-            flush=True
-        )
-
-        clip = create_scene(
-            scene,
-            i
-        )
-
-        if clip is None:
-            raise ValueError(
-                f"❌ Scene {i + 1} returned no video clip"
-            )
-
-        if clip.duration is None or clip.duration <= 0:
-            raise ValueError(
-                f"❌ Scene {i + 1} has invalid duration: "
-                f"{clip.duration}"
-            )
-
-        clips.append(
-            clip
-        )
-
-    # --------------------------------------------------------
-    # Validate clips before adding CTA
-    # --------------------------------------------------------
-
-    if len(clips) <= 1:
-        raise ValueError(
-            "❌ No story scenes were generated"
-        )
-
-    # --------------------------------------------------------
-    # Final Like / Subscribe / CTA page
-    # --------------------------------------------------------
-
-    print(
-        f"\n📣 Adding final Like/Subscribe page: "
-        f"{CTA_URL}",
-        flush=True
-    )
-
-    end_card = create_end_card(
-        END_CARD_DURATION
-    )
-
-    clips.append(
-        end_card
-    )
-
-    # --------------------------------------------------------
-    # Prepare cinematic crossfades
-    # --------------------------------------------------------
-    #
-    # Old behavior:
-    #
-    #   Scene 1 | Scene 2 | Scene 3
-    #             HARD CUT
-    #
-    # New behavior:
-    #
-    #   Scene 1 ─────────╲
-    #                    ╲ Scene 2
-    #                     ╲────────
-    #
-    # The next clip fades in while the previous clip is still
-    # playing. Negative padding creates the overlap.
-    # --------------------------------------------------------
-
-    transitioned_clips = []
-
-    for index, clip in enumerate(clips):
-
-        if index == 0:
-
-            # Opening title starts normally.
-            transitioned_clips.append(
-                clip
-            )
-
-        else:
-
-            fade_duration = min(
-                TRANSITION_DURATION,
-                max(
-                    0.05,
-                    clip.duration * 0.30
-                )
-            )
-
-            print(
-                f"🎞️ Crossfade before clip "
-                f"{index + 1}: "
-                f"{fade_duration:.2f}s",
-                flush=True
-            )
-
-            transitioned_clips.append(
-                clip.crossfadein(
-                    fade_duration
-                )
-            )
-
-    # --------------------------------------------------------
-    # Combine all clips with overlap.
-    #
-    # IMPORTANT:
-    # padding=-TRANSITION_DURATION means the next clip starts
-    # before the previous clip has completely finished.
-    #
-    # This is what creates the actual video crossfade.
-    # --------------------------------------------------------
-
-    final = concatenate_videoclips(
-        transitioned_clips,
-        method="compose",
-        padding=-TRANSITION_DURATION
-    )
-
-    # --------------------------------------------------------
-    # Speed up final video by 15%
-    #
-    # Video and audio are sped up together, preserving sync.
-    # --------------------------------------------------------
-
-    final = final.fx(
-        vfx.speedx,
-        1.15
-    )
-
-    print(
-        f"\n🎬 Final video duration (1.15x): "
-        f"{final.duration:.2f}s",
-        flush=True
-    )
-
-    # --------------------------------------------------------
-    # Write final MP4
-    # --------------------------------------------------------
-
-    output_path = "final_video.mp4"
-
-    print(
-        f"💾 Writing final video: {output_path}",
-        flush=True
-    )
-
-    final.write_videofile(
-        output_path,
-        fps=FPS,
-        codec="libx264",
-        audio_codec="aac",
-        threads=2
-    )
-
-    print(
-        f"✅ Final video created: {output_path}",
-        flush=True
-    )
-
-    # --------------------------------------------------------
-    # Cleanup
-    # --------------------------------------------------------
+    print("==========================================", flush=True)
+    print(f"🎬 BUILDING PART {part_no}", flush=True)
+    print(f"📖 Story title : {title}", flush=True)
+    print(f"🧩 Part title  : {part_title or f'Part {part_no}'}", flush=True)
+    print(f"🎞️ Scenes      : {len(scenes)}", flush=True)
+    print("==========================================", flush=True)
 
     try:
-        final.close()
-    except Exception:
-        pass
+        title_clip = create_title_card(
+            title,
+            TITLE_CARD_DURATION,
+            part_no=part_no,
+        )
+        clips.append(title_clip)
 
-    for clip in clips:
-        try:
-            clip.close()
-        except Exception:
-            pass
+        for i, scene in enumerate(scenes):
+            print(
+                f"\n🎬 Part {part_no} - scene {i + 1}/{len(scenes)}",
+                flush=True,
+            )
+            clip = create_scene(
+                scene,
+                i,
+                part_no=part_no,
+            )
+            if clip is None:
+                raise ValueError(
+                    f"Part {part_no}, scene {i + 1} returned no video clip"
+                )
+            if clip.duration is None or clip.duration <= 0:
+                raise ValueError(
+                    f"Part {part_no}, scene {i + 1} has invalid duration: {clip.duration}"
+                )
+            clips.append(clip)
+
+        if len(clips) <= 1:
+            raise ValueError(f"Part {part_no} has no valid story scenes")
+
+        print(
+            f"\n📣 Adding final CTA to Part {part_no}: {CTA_URL}",
+            flush=True,
+        )
+        clips.append(create_end_card(END_CARD_DURATION))
+
+        transitioned = []
+        for index, clip in enumerate(clips):
+            if index == 0:
+                transitioned.append(clip)
+                continue
+
+            fade = min(
+                transition_duration,
+                max(0.05, clip.duration * 0.30),
+            )
+            print(
+                f"🎞️ Part {part_no} crossfade before clip {index + 1}: {fade:.2f}s",
+                flush=True,
+            )
+            transitioned.append(clip.crossfadein(fade))
+
+        final = concatenate_videoclips(
+            transitioned,
+            method="compose",
+            padding=-transition_duration,
+        )
+
+        final = final.fx(vfx.speedx, 1.15)
+
+        output_path = os.path.abspath(
+            os.path.join(part_dir, f"part_{part_no:02d}.mp4")
+        )
+
+        print(
+            f"\n🎬 Part {part_no} final duration (1.15x): {final.duration:.2f}s",
+            flush=True,
+        )
+        print(f"💾 Writing: {output_path}", flush=True)
+
+        final.write_videofile(
+            output_path,
+            fps=FPS,
+            codec="libx264",
+            audio_codec="aac",
+            threads=2,
+        )
+
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+            raise RuntimeError(
+                f"Part {part_no} video was not created or is empty"
+            )
+
+        print(f"✅ Part {part_no} video created: {output_path}", flush=True)
+        return output_path
+
+    finally:
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
