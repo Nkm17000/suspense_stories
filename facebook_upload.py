@@ -301,6 +301,7 @@ def upload_video(
     data = {
         "title": facebook_title,
         "description": description,
+        "published": True
     }
 
     try:
