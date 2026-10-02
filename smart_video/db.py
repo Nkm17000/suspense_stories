@@ -388,14 +388,48 @@ def get_story_from_mongodb():
             validated_all.append({
                 "part_no": part["part_no"],
                 "part_title": part["part_title"],
-                "status": str(part.get("status") or "PENDING").upper(),
+                "status": "PENDING",
                 "scenes": _validate_part_scenes(part),
             })
+
+        # IMPORTANT: part_results is the execution source of truth. Older story
+        # documents may have parts[].status left as PENDING even though the
+        # corresponding part_results entry is already SUCCESS/FAILED/SKIPPED.
+        # Prefer the persisted part_results status so completed parts are never
+        # rebuilt just because the legacy parts array is stale.
+        existing_results = story.get("part_results") or {}
+        for part in validated_all:
+            key = f"part_{part['part_no']:02d}"
+            old_result = existing_results.get(key, {}) if isinstance(existing_results, dict) else {}
+            result_status = str(old_result.get("status") or "").upper()
+            raw_status = "PENDING"
+            for raw_part in all_parts:
+                try:
+                    raw_no = int(raw_part.get("part_no", -1))
+                except (TypeError, ValueError):
+                    raw_no = -1
+                if raw_no == part["part_no"]:
+                    raw_status = str(raw_part.get("status") or "PENDING").upper()
+                    break
+            if result_status in PART_STATUSES:
+                part["status"] = result_status
+            elif raw_status in PART_STATUSES:
+                part["status"] = raw_status
+            else:
+                part["status"] = "PENDING"
 
         part_results = _initialize_part_results(story, validated_all)
         collection.update_one(
             {"_id": story["_id"]},
-            {"$set": {"part_results": part_results, "overall_status": "PROCESSING", "status": "PROCESSING", "total_parts": len(validated_all), "updated_at": now}},
+            {"$set": {
+                "part_results": part_results,
+                # Keep the legacy parts array synchronized with part_results.
+                "parts": validated_all,
+                "overall_status": "PROCESSING",
+                "status": "PROCESSING",
+                "total_parts": len(validated_all),
+                "updated_at": now,
+            }},
         )
 
         # Only return PENDING parts to the video pipeline.
