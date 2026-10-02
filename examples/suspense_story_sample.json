@@ -1,0 +1,42 @@
+{
+  "story_id": "कहानी_001",
+  "title": "पुराने स्टेशन की आखिरी घंटी",
+  "status": "PENDING",
+  "category": "रहस्य और सस्पेंस",
+  "language": "hi",
+  "style": "cinematic dark suspense realistic Indian atmosphere",
+  "characters": {
+    "MAIN": {
+      "id": "arjun_32",
+      "name": "अर्जुन",
+      "description": "32 वर्षीय भारतीय पुरुष, सांवला चेहरा, छोटे काले बाल, नीली शर्ट और गहरे रंग की जींस"
+    },
+    "SUPPORT": {
+      "id": "rohan_35",
+      "name": "रोहन",
+      "description": "35 वर्षीय भारतीय पुरुष, गेहुँआ चेहरा, छोटे काले बाल, भूरे रंग की जैकेट और काली पैंट"
+    }
+  },
+  "parts": [
+    {
+      "part_no": 1,
+      "part_title": "आधी रात का संकेत",
+      "scenes": [
+        {
+          "scene_number": 1,
+          "text": "आधी रात के बाद अर्जुन पुराने स्टेशन के बाहर रुका। तभी बंद प्लेटफॉर्म से घंटी की आवाज आई। रोहन ने धीमी आवाज में पूछा, \"यह आवाज फिर कैसे आई?\"",
+          "sub_image_prompts": [
+            {
+              "text": "अर्जुन और रोहन बंद स्टेशन के बाहर खड़े हैं",
+              "scene_prompt": "Arjun, a 32-year-old Indian man with medium-brown skin, short black hair, wearing a blue shirt and dark jeans, stands beside Rohan, a 35-year-old Indian man with wheatish skin, short black hair, wearing a brown jacket and black pants, outside an abandoned Indian railway station at midnight, both men staring toward a dark locked platform, tense expressions, faint fog, cinematic suspense lighting, wide shot, realistic Indian environment, no text, no watermark."
+            },
+            {
+              "text": "दोनों पुरुष बंद प्लेटफॉर्म की ओर देखते हैं",
+              "scene_prompt": "Arjun, a 32-year-old Indian man with medium-brown skin, short black hair, wearing a blue shirt and dark jeans, and Rohan, a 35-year-old Indian man with wheatish skin, short black hair, wearing a brown jacket and black pants, stand close together facing a locked railway platform, Arjun looks alert while Rohan looks frightened, a distant old station bell glowing under a weak yellow lamp, deep shadows, cinematic suspense mood, medium shot, realistic Indian setting, no text, no watermark."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

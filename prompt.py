@@ -1,72 +1,72 @@
-def build_prompt(title: str) -> str:
+def build_prompt(topic: str) -> str:
     return f"""
-You are an expert viral short-video storyteller. 
+You are an expert Hindi suspense storyteller creating short cinematic social-media stories.
 
-Generate a complete cinematic story with title: {title} in JSON format.
+Generate ONE complete suspense story for this topic: "{topic}"
 
-⚠️ STRICT OUTPUT RULES:
+OUTPUT ONLY VALID JSON. No markdown and no explanation.
 
-1. Output ONLY valid JSON.
-2. Follow this exact structure:
-
+EXACT JSON STRUCTURE:
 {{
-"CHARACTERS": {{
-"MAIN": "...",
-"SUPPORT": "..."
-}},
-"STYLE": "...",
-"scenes": [
-{{
-"text": "...",
-"image_prompt": "..."
+  "story_id": "कहानी_001",
+  "title": "हिंदी शीर्षक",
+  "status": "PENDING",
+  "category": "रहस्य और सस्पेंस",
+  "language": "hi",
+  "style": "cinematic dark suspense realistic Indian atmosphere",
+  "characters": {{
+    "MAIN": {{
+      "id": "arjun_32",
+      "name": "अर्जुन",
+      "description": "32 वर्षीय भारतीय पुरुष, सांवला चेहरा, छोटे काले बाल, नीली शर्ट"
+    }},
+    "SUPPORT": {{
+      "id": "rohan_35",
+      "name": "रोहन",
+      "description": "35 वर्षीय भारतीय पुरुष, गेहुँआ चेहरा, छोटे काले बाल, भूरे रंग की जैकेट"
+    }}
+  }},
+  "parts": [
+    {{
+      "part_no": 1,
+      "part_title": "हिंदी भाग शीर्षक",
+      "scenes": [
+        {{
+          "scene_number": 1,
+          "text": "पूरा हिंदी संवाद और वर्णन...",
+          "sub_image_prompts": [
+            {{
+              "text": "हिंदी में इस दृश्य का छोटा वर्णन",
+              "scene_prompt": "English only cinematic image prompt..."
+            }},
+            {{
+              "text": "हिंदी में दूसरा दृश्य वर्णन",
+              "scene_prompt": "English only cinematic image prompt..."
+            }}
+          ]
+        }}
+      ]
+    }}
+  ]
 }}
-]
-}}
 
----
+STRICT STORY RULES:
+1. `text`, `title`, `category`, `part_title`, and sub-image `text` must be entirely in Hindi.
+2. The story must have exactly TWO recurring characters: MAIN and SUPPORT. Both must be boys/men.
+3. Both characters must communicate with each other through natural Hindi dialogue in the story.
+4. Keep the same character names, ages, clothing, facial features, and roles in every scene.
+5. Create a strong hook in the first scene, escalating mystery, clues, a believable twist, and a satisfying ending.
+6. Avoid supernatural gore. Keep suspense suitable for a broad Indian social-media audience.
+7. Each part should contain exactly 10 scenes.
+8. Each scene should have 1–2 `sub_image_prompts`. If the scene text is visually dense, use 2.
+9. Each `scene_prompt` MUST be English only. Do not use any Hindi, Devanagari, Hindi names, or Hindi characters in `scene_prompt`.
+10. Because image requests are sent one at a time, EVERY `scene_prompt` must repeat the complete MAIN and SUPPORT visual descriptions needed for that image. Never rely on a previous prompt.
+11. Every `scene_prompt` must describe the actual moment from the matching `text`, the location, action, emotion, lighting, camera framing, and cinematic suspense mood.
+12. Do not put dialogue text, captions, logos, watermarks, or written words inside the generated image.
+13. Keep `scene_prompt` concise enough for an image model but detailed enough to preserve character consistency.
+14. Do not create new characters unless absolutely necessary; if a background person is unavoidable, keep them visually indistinct.
+15. Use natural Indian environments: homes, streets, shops, railway areas, offices, villages, or city neighborhoods as appropriate.
+16. Output valid JSON only.
 
-🎭 CHARACTER RULES:
-
-- Create your OWN characters based on story
-- Each character description MUST be ≤ 4 words
-- Format: name + age + look + feature
-  👉 Example: "Raju 10yr poor boy"
-- Keep characters consistent in ALL scenes
-
----
-
-🎨 STYLE RULES:
-
-- Define style based on story mood
-- Keep ≤ 6 words
-- Example:
-  - "cinematic dark emotional 4k"
-  - "fantasy magical vibrant lighting"
-
----
-
-📖 STORY RULES:
-
-- Generate 10–15 scenes
-- Each "text":
-  - Emotional + suspense
-  - Use "..." for pauses
-- Flow:
-  Hook → Setup → Conflict → Emotion → Transformation → Ending
-
----
-
-🖼️ IMAGE PROMPT RULES:
-
-- MUST include character name (MAIN or SUPPORT)
-- Add emotion + environment
-- Keep short but descriptive
-- ALWAYS append STYLE at end
-
----
-
-🎯 STORY TOPIC:
-Use this topic: "{title}"
-
-Now generate the output.
+Create the story now.
 """

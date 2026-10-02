@@ -21,9 +21,19 @@ jobs:
 
     env:
       MONGODB_URI: ${{ secrets.MONGODB_URI }}
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      INSTAGRAM_BUSINESS_ACCOUNT_ID: ${{ secrets.INSTAGRAM_BUSINESS_ACCOUNT_ID }}
+      INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+      META_GRAPH_VERSION: v23.0
+      CLOUDFLARE_IMAGE_MODEL: "@cf/black-forest-labs/flux-1-schnell"
+      CLOUDFLARE_IMAGE_STEPS: "1"
+      CLOUDFLARE_IMAGE_RETRIES: "2"
+      CLOUDFLARE_IMAGE_TIMEOUT: "120"
+      CLOUDFLARE_DAILY_NEURON_LIMIT: "10000"
+      CLOUDFLARE_POLLINATIONS_THRESHOLD: "200"
 
       CTA_URL: "https://www.facebook.com/thesmartlearninglab"
 
@@ -148,6 +158,10 @@ jobs:
         run: |
           test -n "$FB_PAGE_ID"
           test -n "$FB_PAGE_ACCESS_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$INSTAGRAM_BUSINESS_ACCOUNT_ID"
+          test -n "$INSTAGRAM_ACCESS_TOKEN"
 
       - name: Validate title configuration
         run: |
@@ -161,7 +175,7 @@ jobs:
           for file in smart_video/*.py; do
             python -m py_compile "$file"
           done
-          python -m py_compile facebook_upload.py
+          python -m py_compile facebook_upload.py\n          python -m py_compile instagram_service.py
 
       - name: Run Long Story Generator
         run: |

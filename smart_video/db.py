@@ -6,11 +6,15 @@ from datetime import datetime, timezone
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import ConnectionFailure
 
-from .config import MONGODB_URI, STORY_ID
+from .config import (
+    MONGODB_URI,
+    STORY_ID,
+    DATABASE_NAME,
+    COLLECTION_NAME,
+    MONGODB_SERVER_TIMEOUT_MS,
+)
 
 # Long-story collection requested for this pipeline.
-DATABASE_NAME = "storydb"
-COLLECTION_NAME = "longstory"
 
 PART_STATUSES = {
     "PENDING",
@@ -29,7 +33,7 @@ def get_mongodb_collection():
         print("🔌 Connecting to MongoDB Atlas...", flush=True)
         client = MongoClient(
             MONGODB_URI,
-            serverSelectionTimeoutMS=10000,
+            serverSelectionTimeoutMS=MONGODB_SERVER_TIMEOUT_MS,
         )
         client.admin.command("ping")
         db = client[DATABASE_NAME]
@@ -200,7 +204,7 @@ def _validate_part_scenes(part):
         for item in prompts:
             if not isinstance(item, dict):
                 continue
-            image_prompt = item.get("image_prompt")
+            image_prompt = item.get("scene_prompt") or item.get("image_prompt")
             if not isinstance(image_prompt, str) or not image_prompt.strip():
                 continue
 
@@ -241,6 +245,8 @@ def _initialize_part_results(story, parts):
             "video_path": None,
             "facebook_status": "PENDING",
             "facebook_video_id": None,
+            "instagram_status": "PENDING",
+            "instagram_media_id": None,
             "started_at": None,
             "completed_at": None,
             "updated_at": now,

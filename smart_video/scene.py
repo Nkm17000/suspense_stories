@@ -267,9 +267,7 @@ def create_scene(
             ""
         )
 
-        image_prompt = item[
-            "image_prompt"
-        ]
+        image_prompt = item.get("scene_prompt") or item.get("image_prompt")
 
         print(
             f"   🖼️ Image "
@@ -468,9 +466,7 @@ def create_scene(
         start=1
     ):
 
-        image_prompt = item[
-            "image_prompt"
-        ]
+        image_prompt = item.get("scene_prompt") or item.get("image_prompt")
 
         if not image_prompt:
             raise ValueError(
