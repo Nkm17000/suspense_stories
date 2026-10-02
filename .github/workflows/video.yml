@@ -171,11 +171,8 @@ jobs:
 
       - name: Validate Python source
         run: |
-          python -m py_compile main.py
-          for file in smart_video/*.py; do
-            python -m py_compile "$file"
-          done
-          python -m py_compile facebook_upload.py\n          python -m py_compile instagram_service.py
+          python -m compileall -q .
+          echo "Python syntax validation passed"
 
       - name: Run Long Story Generator
         run: |
