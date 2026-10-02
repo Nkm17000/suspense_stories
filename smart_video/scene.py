@@ -185,7 +185,8 @@ def _apply_ken_burns(
 def create_scene(
     scene,
     index,
-    part_no=1
+    part_no=1,
+    story_id=None
 ):
 
     part_no = int(part_no)
@@ -490,7 +491,9 @@ def create_scene(
         img = generate_image(
             image_prompt,
             img_path,
-            text
+            text,
+            story_id=story_id,
+            part_no=part_no,
         )
 
         if not img:

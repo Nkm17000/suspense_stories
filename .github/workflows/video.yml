@@ -3,18 +3,16 @@ name: Generate Long Story Video
 on:
   workflow_dispatch:
 
-  push:
-    branches:
-      - main
-
   schedule:
+    # Once per day: 02:00 UTC / 07:30 IST.
     - cron: "0 2 * * *"
-    - cron: "0 10 * * *"
-    - cron: "0 18 * * *"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: suspense-story-generator
+      cancel-in-progress: false
 
     permissions:
       contents: read
@@ -23,8 +21,20 @@ jobs:
       MONGODB_URI: ${{ secrets.MONGODB_URI }}
       FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Cloudflare account rotation. Add more numbered pairs if needed.
+      CLOUDFLARE_ACCOUNT_COUNT: "5"
+      CLOUDFLARE_ACCOUNT_SWITCH_THRESHOLD: "8300"
+      CLOUDFLARE_ACCOUNT_ID_1: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_1 }}
+      CLOUDFLARE_API_TOKEN_1: ${{ secrets.CLOUDFLARE_API_TOKEN_1 }}
+      CLOUDFLARE_ACCOUNT_ID_2: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
+      CLOUDFLARE_API_TOKEN_2: ${{ secrets.CLOUDFLARE_API_TOKEN_2 }}
+      CLOUDFLARE_ACCOUNT_ID_3: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_3 }}
+      CLOUDFLARE_API_TOKEN_3: ${{ secrets.CLOUDFLARE_API_TOKEN_3 }}
+      CLOUDFLARE_ACCOUNT_ID_4: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_4 }}
+      CLOUDFLARE_API_TOKEN_4: ${{ secrets.CLOUDFLARE_API_TOKEN_4 }}
+      CLOUDFLARE_ACCOUNT_ID_5: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_5 }}
+      CLOUDFLARE_API_TOKEN_5: ${{ secrets.CLOUDFLARE_API_TOKEN_5 }}
+      CLOUDFLARE_USAGE_COLLECTION: "cloudflare_daily_usage"
       INSTAGRAM_BUSINESS_ACCOUNT_ID: ${{ secrets.INSTAGRAM_BUSINESS_ACCOUNT_ID }}
       INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
       META_GRAPH_VERSION: v23.0
@@ -158,8 +168,8 @@ jobs:
         run: |
           test -n "$FB_PAGE_ID"
           test -n "$FB_PAGE_ACCESS_TOKEN"
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID_1"
+          test -n "$CLOUDFLARE_API_TOKEN_1"
           test -n "$INSTAGRAM_BUSINESS_ACCOUNT_ID"
           test -n "$INSTAGRAM_ACCESS_TOKEN"
 
@@ -177,8 +187,10 @@ jobs:
       - name: Run Long Story Generator
         run: |
           echo "=========================================="
-          echo "Starting sequential long-story generator"
-          echo "Each part: build -> Facebook post -> next part"
+          echo "Starting suspense-story generator"
+          echo "Scheduler: once per day; manual workflow_dispatch: runs immediately"
+          echo "Only story parts with status=PENDING will be executed"
+          echo "Cloudflare account rotation threshold: 8300 neurons/account/day"
           echo "=========================================="
           python main.py
 

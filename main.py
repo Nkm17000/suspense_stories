@@ -32,17 +32,34 @@ def build_instagram_caption(title, part_no, part_title):
 
 
 def _mark_part_failed(story, part_no, error, video_path=None,
-                      facebook_status="FAILED", instagram_status="FAILED"):
+                      facebook_status="FAILED", instagram_status="FAILED", neuron_fields=None):
+    fields = {
+        "error": str(error),
+        "video_path": video_path,
+        "facebook_status": facebook_status,
+        "instagram_status": instagram_status,
+        "failed_at": datetime.now(timezone.utc),
+    }
+    if neuron_fields:
+        fields.update(neuron_fields)
     update_part_status(
         story, part_no, "FAILED",
-        {
-            "error": str(error),
-            "video_path": video_path,
-            "facebook_status": facebook_status,
-            "instagram_status": instagram_status,
-            "failed_at": datetime.now(timezone.utc),
-        },
+        fields,
     )
+
+
+def _part_neuron_totals(before, after):
+    before_total = float(before.get("total_cloudflare_neurons", 0.0) or 0.0)
+    after_total = float(after.get("total_cloudflare_neurons", 0.0) or 0.0)
+    before_est = float(before.get("estimated_cloudflare_neurons", 0.0) or 0.0)
+    after_est = float(after.get("estimated_cloudflare_neurons", 0.0) or 0.0)
+    before_rep = float(before.get("reported_cloudflare_neurons", 0.0) or 0.0)
+    after_rep = float(after.get("reported_cloudflare_neurons", 0.0) or 0.0)
+    return {
+        "cloudflare_neurons_used": round(max(0.0, after_total - before_total), 2),
+        "estimated_cloudflare_neurons": round(max(0.0, after_est - before_est), 2),
+        "reported_cloudflare_neurons": round(max(0.0, after_rep - before_rep), 2),
+    }
 
 
 def main():
@@ -69,6 +86,9 @@ def main():
         start_story_usage(story_id=story_id, story_title=title)
 
         for part in parts:
+            if str(part.get("status", "PENDING")).upper() != "PENDING":
+                print(f"⏭️ Skipping Part {part.get('part_no')}: status={part.get('status')}", flush=True)
+                continue
             part_no = int(part["part_no"])
             part_title = str(part.get("part_title") or f"भाग {part_no}").strip()
             scenes = part.get("scenes") or []
@@ -78,6 +98,7 @@ def main():
             print(f"🎬 Scenes: {len(scenes)}")
             print("=" * 60)
 
+            part_usage_before = get_usage_summary()
             update_part_status(
                 story, part_no, "PROCESSING",
                 {
@@ -102,7 +123,7 @@ def main():
 
             try:
                 video_path = build_part_video(
-                    scenes=scenes, title=title, part_no=part_no, part_title=part_title
+                    scenes=scenes, title=title, part_no=part_no, part_title=part_title, story_id=story_id
                 )
 
                 # Publish to Facebook first.
@@ -141,6 +162,12 @@ def main():
                     ig_status = "FAILED"
 
                 if fb_status == "POSTED" or ig_status == "POSTED":
+                    part_usage_after = get_usage_summary()
+                    part_neurons = _part_neuron_totals(part_usage_before, part_usage_after)
+                    print(
+                        f"📊 PART {part_no} Cloudflare neurons used: "
+                        f"{part_neurons['cloudflare_neurons_used']:.2f}", flush=True
+                    )
                     update_part_status(
                         story, part_no, "SUCCESS",
                         {
@@ -150,9 +177,14 @@ def main():
                             "instagram_status": ig_status,
                             "instagram_media_id": ig_id,
                             "error": None,
+                            **part_neurons,
                             "completed_at": datetime.now(timezone.utc),
                         },
                     )
+                    for local_part in story.get("parts", []):
+                        if int(local_part.get("part_no", -1)) == part_no:
+                            local_part["status"] = "SUCCESS"
+                            break
                     successful_parts += 1
                     print(f"✅ PART {part_no} SUCCESS", flush=True)
                 else:
@@ -160,10 +192,17 @@ def main():
 
             except Exception as exc:
                 failed_parts += 1
+                part_usage_after = get_usage_summary()
+                part_neurons = _part_neuron_totals(part_usage_before, part_usage_after)
                 print(f"❌ PART {part_no} FAILED: {exc}", flush=True)
+                for local_part in story.get("parts", []):
+                    if int(local_part.get("part_no", -1)) == part_no:
+                        local_part["status"] = "FAILED"
+                        break
                 _mark_part_failed(
                     story, part_no, exc, video_path=video_path,
                     facebook_status=fb_status, instagram_status=ig_status,
+                    neuron_fields=part_neurons,
                 )
 
         report_path, usage = save_usage_report()
@@ -175,13 +214,25 @@ def main():
         print(f"🧮 Cloudflare neurons used/estimated: {usage['total_cloudflare_neurons']:.2f}", flush=True)
         print(f"📄 Usage report: {report_path}", flush=True)
 
-        overall = "SUCCESS" if failed_parts == 0 and successful_parts > 0 else (
-            "PARTIAL_SUCCESS" if successful_parts > 0 else "FAILED"
-        )
+        # Re-read the story's part statuses. A story remains PROCESSING while any
+        # part is still PENDING; this allows a later workflow run to pick it up.
+        remaining_pending = 0
+        for p in story.get("parts", []):
+            if str(p.get("status", "PENDING")).upper() == "PENDING":
+                remaining_pending += 1
+
+        if remaining_pending > 0:
+            overall = "PROCESSING"
+        elif failed_parts > 0 and successful_parts > 0:
+            overall = "PARTIAL_SUCCESS"
+        elif failed_parts > 0:
+            overall = "FAILED"
+        else:
+            overall = "COMPLETED"
         ok = update_story_status(
             story, overall,
             {
-                "completed_at": datetime.now(timezone.utc),
+                **({"completed_at": datetime.now(timezone.utc)} if overall in ("COMPLETED", "PARTIAL_SUCCESS", "FAILED") else {}),
                 "last_error": None if failed_parts == 0 else f"{failed_parts} part(s) failed.",
                 "image_usage": usage,
                 "usage_report_path": report_path,

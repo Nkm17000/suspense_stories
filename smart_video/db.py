@@ -21,6 +21,7 @@ PART_STATUSES = {
     "PROCESSING",
     "SUCCESS",
     "FAILED",
+    "SKIPPED",
 }
 
 
@@ -166,6 +167,7 @@ def _normalize_parts(story):
             normalized.append({
                 "part_no": part_no,
                 "part_title": str(part.get("part_title") or f"Part {part_no}").strip(),
+                "status": str(part.get("status") or "PENDING").upper(),
                 "scenes": part.get("scenes") or [],
             })
 
@@ -177,6 +179,7 @@ def _normalize_parts(story):
         return [{
             "part_no": 1,
             "part_title": "Part 1",
+            "status": "PENDING",
             "scenes": scenes,
         }]
 
@@ -232,27 +235,34 @@ def _validate_part_scenes(part):
 
 
 def _initialize_part_results(story, parts):
-    """Create top-level execution metadata without changing story content."""
+    """Create/preserve part execution metadata; never reset completed/skipped parts."""
     now = datetime.now(timezone.utc)
+    existing = story.get("part_results") or {}
     part_results = {}
     for part in parts:
         key = f"part_{part['part_no']:02d}"
+        old = existing.get(key, {}) if isinstance(existing, dict) else {}
+        status = str(part.get("status") or old.get("status") or "PENDING").upper()
+        if status not in PART_STATUSES:
+            status = "PENDING"
         part_results[key] = {
             "part_no": part["part_no"],
             "part_title": part["part_title"],
-            "status": "PENDING",
-            "error": None,
-            "video_path": None,
-            "facebook_status": "PENDING",
-            "facebook_video_id": None,
-            "instagram_status": "PENDING",
-            "instagram_media_id": None,
-            "started_at": None,
-            "completed_at": None,
+            "status": status,
+            "error": old.get("error"),
+            "video_path": old.get("video_path"),
+            "facebook_status": old.get("facebook_status", "PENDING"),
+            "facebook_video_id": old.get("facebook_video_id"),
+            "instagram_status": old.get("instagram_status", "PENDING"),
+            "instagram_media_id": old.get("instagram_media_id"),
+            "started_at": old.get("started_at"),
+            "completed_at": old.get("completed_at"),
             "updated_at": now,
+            "cloudflare_neurons_used": float(old.get("cloudflare_neurons_used", 0.0) or 0.0),
+            "estimated_cloudflare_neurons": float(old.get("estimated_cloudflare_neurons", 0.0) or 0.0),
+            "reported_cloudflare_neurons": float(old.get("reported_cloudflare_neurons", 0.0) or 0.0),
         }
     return part_results
-
 
 def update_part_status(story, part_no, status, extra_fields=None, retries=3):
     """Update one part result under part_results.part_XX."""
@@ -267,6 +277,7 @@ def update_part_status(story, part_no, status, extra_fields=None, retries=3):
     fields = {
         f"{path}.part_no": int(part_no),
         f"{path}.status": status,
+        f"parts.$[p].status": status,
         f"{path}.updated_at": datetime.now(timezone.utc),
     }
     if extra_fields:
@@ -284,7 +295,7 @@ def update_part_status(story, part_no, status, extra_fields=None, retries=3):
         client = None
         try:
             client, collection = get_mongodb_collection()
-            collection.update_one(query, {"$set": fields})
+            collection.update_one(query, {"$set": fields}, array_filters=[{"p.part_no": int(part_no)}])
             current = collection.find_one(
                 query,
                 {f"{path}.status": 1},
@@ -324,99 +335,88 @@ def update_part_status(story, part_no, status, extra_fields=None, retries=3):
 
 
 def get_story_from_mongodb():
-    """Atomically claim one PENDING long story and return its validated parts."""
+    """Claim one story and return ONLY its PENDING parts.
+
+    A story may be newly PENDING or already PROCESSING from an earlier run.
+    Completed/skipped/failed parts are not rebuilt unless their part status is
+    manually changed back to PENDING.
+    """
     client, collection = get_mongodb_collection()
-
     try:
+        story = None
+        now = datetime.now(timezone.utc)
         if STORY_ID:
-            query = {"story_id": STORY_ID, "status": "PENDING"}
-            sort_order = [("story_no", 1)]
-            print(f"🔎 Requested STORY_ID: {STORY_ID}", flush=True)
+            base_query = {"story_id": STORY_ID, "status": {"$in": ["PENDING", "PROCESSING", "FAILED", "PARTIAL_SUCCESS"]}}
         else:
-            query = {"status": "PENDING"}
-            sort_order = [("story_no", 1), ("story_id", 1)]
-            print("🔎 Searching for next PENDING long story...", flush=True)
+            base_query = {"status": {"$in": ["PENDING", "PROCESSING", "FAILED", "PARTIAL_SUCCESS"]}}
 
+        # First claim a new PENDING story.
+        query = dict(base_query)
+        query["status"] = "PENDING"
         story = collection.find_one_and_update(
             query,
-            {
-                "$set": {
-                    "status": "PROCESSING",
-                    "overall_status": "PROCESSING",
-                    "processing_at": datetime.now(timezone.utc),
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
-            sort=sort_order,
+            {"$set": {"status": "PROCESSING", "overall_status": "PROCESSING", "processing_at": now, "updated_at": now}},
+            sort=[("story_no", 1), ("story_id", 1)],
             return_document=ReturnDocument.AFTER,
         )
 
+        # If no new story exists, resume an existing PROCESSING story only if it has PENDING parts.
         if not story:
-            print("ℹ️ No PENDING long story available.", flush=True)
+            query = dict(base_query)
+            query["status"] = "PROCESSING"
+            query["$or"] = [
+                {"parts": {"$elemMatch": {"status": "PENDING"}}},
+                {"part_results": {"$exists": True}},
+            ]
+            candidates = collection.find(query).sort([("story_no", 1), ("story_id", 1)])
+            for candidate in candidates:
+                parts_raw = candidate.get("parts") or []
+                pending_exists = any(str(p.get("status", "PENDING")).upper() == "PENDING" for p in parts_raw if isinstance(p, dict))
+                if pending_exists:
+                    story = candidate
+                    break
+
+        if not story:
+            print("ℹ️ No PENDING story or PROCESSING story with PENDING parts available.", flush=True)
             return None, []
 
-        story_id = (
-            story.get("story_id")
-            or story.get("id")
-            or story.get("ID")
-            or "unknown"
-        )
+        story_id = story.get("story_id") or story.get("id") or story.get("ID") or "unknown"
         title = str(story.get("title") or "Untitled Story").strip()
-        parts = _normalize_parts(story)
-
-        if not parts:
-            message = "Story contains no parts/scenes"
-            collection.update_one(
-                {"_id": story["_id"]},
-                {"$set": {
-                    "status": "FAILED",
-                    "overall_status": "FAILED",
-                    "last_error": message,
-                    "updated_at": datetime.now(timezone.utc),
-                }},
-            )
-            raise ValueError(f"❌ {message}")
-
-        # Validate every part independently. Invalid parts remain in the list
-        # with empty scenes so main.py can record FAILED and continue.
-        validated_parts = []
-        for part in parts:
-            validated_parts.append({
+        all_parts = _normalize_parts(story)
+        validated_all = []
+        for part in all_parts:
+            validated_all.append({
                 "part_no": part["part_no"],
                 "part_title": part["part_title"],
+                "status": str(part.get("status") or "PENDING").upper(),
                 "scenes": _validate_part_scenes(part),
             })
 
-        part_results = _initialize_part_results(story, validated_parts)
+        part_results = _initialize_part_results(story, validated_all)
         collection.update_one(
             {"_id": story["_id"]},
-            {"$set": {
-                "part_results": part_results,
-                "overall_status": "PROCESSING",
-                "status": "PROCESSING",
-                "total_parts": len(validated_parts),
-                "updated_at": datetime.now(timezone.utc),
-            }},
+            {"$set": {"part_results": part_results, "overall_status": "PROCESSING", "status": "PROCESSING", "total_parts": len(validated_all), "updated_at": now}},
         )
 
+        # Only return PENDING parts to the video pipeline.
+        pending_parts = [p for p in validated_all if p["status"] == "PENDING"]
+        story["part_results"] = part_results
+        story["parts"] = validated_all
+
         print("==========================================", flush=True)
-        print("✅ LONG STORY CLAIMED", flush=True)
+        print("✅ LONG STORY CLAIMED/RESUMED", flush=True)
         print(f"🆔 Story ID   : {story_id}", flush=True)
         print(f"📖 Title      : {title}", flush=True)
-        print(f"🧩 Total parts: {len(validated_parts)}", flush=True)
+        print(f"🧩 Total parts: {len(validated_all)}", flush=True)
+        print(f"▶️ Pending parts to execute: {[p['part_no'] for p in pending_parts]}", flush=True)
         print("🔄 Status     : PROCESSING", flush=True)
         print("==========================================", flush=True)
 
-        for part in validated_parts:
-            scene_count = len(part["scenes"])
-            if scene_count != 10:
-                print(
-                    f"⚠️ Part {part['part_no']} has {scene_count} valid scenes; "
-                    "expected 10. It will be processed independently.",
-                    flush=True,
-                )
+        for part in pending_parts:
+            if len(part["scenes"]) != 10:
+                print(f"⚠️ Part {part['part_no']} has {len(part['scenes'])} valid scenes; expected 10.", flush=True)
 
-        return story, validated_parts
-
+        return story, pending_parts
     finally:
         client.close()
+
