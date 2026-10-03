@@ -3,6 +3,10 @@ name: Generate Long Story Video
 on:
   workflow_dispatch:
 
+  push:
+    branches:
+      - main
+
   schedule:
     # Once per day: 02:00 UTC / 07:30 IST.
     - cron: "0 2 * * *"
@@ -23,7 +27,6 @@ jobs:
       FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
       # Cloudflare account rotation. Add more numbered pairs if needed.
       CLOUDFLARE_ACCOUNT_COUNT: "5"
-      CLOUDFLARE_ACCOUNT_SWITCH_THRESHOLD: "8500"
       CLOUDFLARE_ACCOUNT_ID_1: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_1 }}
       CLOUDFLARE_API_TOKEN_1: ${{ secrets.CLOUDFLARE_API_TOKEN_1 }}
       CLOUDFLARE_ACCOUNT_ID_2: ${{ secrets.CLOUDFLARE_ACCOUNT_ID_2 }}
@@ -52,6 +55,7 @@ jobs:
       END_CARD_DURATION: "5"
       TITLE_CARD_DURATION: "2"
       TITLE_TEMPLATE_PATH: "assets/title_page_template.png"
+      IMAGE_PROMPT_PREFIX: "Do not depict real people or photorealistic humans."
 
     steps:
       - name: Checkout code
@@ -188,7 +192,7 @@ jobs:
           echo "Starting suspense-story generator"
           echo "Scheduler: once per day; manual workflow_dispatch: runs immediately"
           echo "Only story parts with status=PENDING will be executed"
-          echo "Cloudflare account rotation threshold: 8500 neurons/account/day"
+          echo "Cloudflare account rotation: numbered accounts; quota exhaustion moves to the next account"
           echo "=========================================="
           python main.py
 
