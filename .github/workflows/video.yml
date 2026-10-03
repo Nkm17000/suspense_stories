@@ -8,8 +8,8 @@ on:
       - main
 
   schedule:
-    # Once per day: 02:00 UTC / 07:30 IST.
-    - cron: "0 2 * * *"
+    # Every 2 hours, every day.
+    - cron: "0 */2 * * *"
 
 jobs:
   build:
@@ -190,7 +190,7 @@ jobs:
         run: |
           echo "=========================================="
           echo "Starting suspense-story generator"
-          echo "Scheduler: once per day; manual workflow_dispatch: runs immediately"
+          echo "Scheduler: every 2 hours; manual workflow_dispatch: runs immediately"
           echo "Only story parts with status=PENDING will be executed"
           echo "Cloudflare account rotation: numbered accounts; quota exhaustion moves to the next account"
           echo "=========================================="
