@@ -73,3 +73,13 @@ The Cloudflare Workers AI REST endpoint used is:
 
 with the account-specific bearer token and JSON payload containing `prompt`
 and `steps`.
+
+## Part / Story State Machine
+
+- Existing story with top-level `PROCESSING`: resume it first. A part whose status is missing, `null`, blank, or `PENDING` is actionable. Only the first actionable part is processed in that run.
+- New story with top-level `PENDING` (or missing/null/blank top-level status): reset every part to `PENDING` and process all parts in that run, even if some parts previously had `SUCCESS`/`FAILED`.
+- Part statuses `null`, missing, or blank are always treated as `PENDING`.
+- If all parts are terminal and at least one succeeded and at least one failed, the story is marked `PARTIAL_COMPLETED`.
+- If all parts succeeded, the story is `COMPLETED`.
+- If all parts failed, the story is `FAILED`.
+- If any part remains pending/null or processing, the story remains `PROCESSING`.

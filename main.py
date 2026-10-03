@@ -86,7 +86,8 @@ def main():
         start_story_usage(story_id=story_id, story_title=title)
 
         for part in parts:
-            if str(part.get("status", "PENDING")).upper() != "PENDING":
+            # Missing/null/blank status means this part still needs processing.
+            if str(part.get("status") or "PENDING").strip().upper() != "PENDING":
                 print(f"⏭️ Skipping Part {part.get('part_no')}: status={part.get('status')}", flush=True)
                 continue
             part_no = int(part["part_no"])
@@ -214,25 +215,60 @@ def main():
         print(f"🧮 Cloudflare neurons used/estimated: {usage['total_cloudflare_neurons']:.2f}", flush=True)
         print(f"📄 Usage report: {report_path}", flush=True)
 
-        # Re-read the story's part statuses. A story remains PROCESSING while any
-        # part is still PENDING; this allows a later workflow run to pick it up.
-        remaining_pending = 0
-        for p in story.get("parts", []):
-            if str(p.get("status", "PENDING")).upper() == "PENDING":
-                remaining_pending += 1
+        # Re-evaluate ALL persisted part statuses from MongoDB. This is the
+        # authoritative state machine; local counters only describe this run.
+        # NULL/missing/blank part status is always actionable PENDING.
+        try:
+            from smart_video.db import get_mongodb_collection
+            _verify_client, _verify_collection = get_mongodb_collection()
+            try:
+                _fresh = _verify_collection.find_one({"_id": story.get("_id")})
+            finally:
+                _verify_client.close()
+        except Exception as _status_exc:
+            print(f"⚠️ Could not re-read final part statuses from MongoDB: {_status_exc}", flush=True)
+            _fresh = None
 
-        if remaining_pending > 0:
+        persisted_parts = (_fresh or story).get("parts", [])
+        part_statuses = []
+        for p in persisted_parts:
+            if isinstance(p, dict):
+                part_statuses.append(str(p.get("status") or "PENDING").strip().upper())
+
+        remaining_pending = sum(1 for status in part_statuses if status == "PENDING")
+        processing_count = sum(1 for status in part_statuses if status == "PROCESSING")
+        failed_count = sum(1 for status in part_statuses if status == "FAILED")
+        success_count = sum(1 for status in part_statuses if status == "SUCCESS")
+        terminal_count = sum(1 for status in part_statuses if status in {"SUCCESS", "FAILED", "SKIPPED"})
+        total_count = len(part_statuses)
+
+        print(
+            "📌 FINAL PART STATE: "
+            f"SUCCESS={success_count}, FAILED={failed_count}, "
+            f"PROCESSING={processing_count}, PENDING/NULL={remaining_pending}, "
+            f"TOTAL={total_count}",
+            flush=True,
+        )
+
+        if remaining_pending > 0 or processing_count > 0:
             overall = "PROCESSING"
-        elif failed_parts > 0 and successful_parts > 0:
-            overall = "PARTIAL_SUCCESS"
-        elif failed_parts > 0:
+        elif failed_count > 0 and terminal_count == total_count:
+            # All parts have reached a terminal state, but at least one failed.
+            # If at least one succeeded, explicitly report partial completion.
+            if success_count > 0 or failed_count < total_count:
+                overall = "PARTIAL_COMPLETED"
+            else:
+                overall = "FAILED"
+        elif success_count == total_count and total_count > 0:
+            overall = "COMPLETED"
+        elif failed_count == total_count and total_count > 0:
             overall = "FAILED"
         else:
-            overall = "COMPLETED"
+            overall = "PROCESSING"
         ok = update_story_status(
             story, overall,
             {
-                **({"completed_at": datetime.now(timezone.utc)} if overall in ("COMPLETED", "PARTIAL_SUCCESS", "FAILED") else {}),
+                **({"completed_at": datetime.now(timezone.utc)} if overall in ("COMPLETED", "PARTIAL_COMPLETED", "FAILED") else {}),
                 "last_error": None if failed_parts == 0 else f"{failed_parts} part(s) failed.",
                 "image_usage": usage,
                 "usage_report_path": report_path,

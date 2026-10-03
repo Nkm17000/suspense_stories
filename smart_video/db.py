@@ -22,6 +22,7 @@ PART_STATUSES = {
     "SUCCESS",
     "FAILED",
     "SKIPPED",
+    "PARTIAL_COMPLETED",
 }
 
 
@@ -133,93 +134,202 @@ def update_story_status(story, status, extra_fields=None, retries=3):
     return False
 
 
-def _normalize_parts(story):
-    """Return the long-story parts in MongoDB order.
+def _coerce_list(value):
+    """Convert common MongoDB/JSON representations into a Python list."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            import json
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
 
-    Expected schema:
-        parts: [
-            {"part_no": 1, "part_title": "...", "scenes": [...]},
-            ...
-        ]
 
-    A legacy single-scenes story is accepted as Part 1 so the pipeline
-    remains backwards compatible, but long-story documents should use parts.
+def _extract_nested_scenes(part):
+    """Read scenes from several compatible part layouts."""
+    candidates = [
+        part.get("scenes"),
+        part.get("scene_list"),
+        part.get("scene_data"),
+    ]
+
+    for container_key in ("content", "data", "story"):
+        container = part.get(container_key)
+        if isinstance(container, dict):
+            candidates.extend([
+                container.get("scenes"),
+                container.get("scene_list"),
+                container.get("scene_data"),
+            ])
+
+    for candidate in candidates:
+        scenes = _coerce_list(candidate)
+        if scenes:
+            return scenes, "part-nested"
+
+    return [], "missing"
+
+
+def _extract_top_level_scenes_for_part(story, part, part_index, part_count):
+    """Fallback for long-story documents that store scenes at story.scenes.
+
+    Preferred mapping uses explicit scene_start/scene_end metadata. If that is
+    absent, an even contiguous split is used only when the scene count divides
+    evenly across parts. This avoids silently assigning arbitrary scenes.
     """
+    top_level = _coerce_list(story.get("scenes"))
+    if not top_level:
+        return [], "missing"
+
+    start_keys = ("scene_start", "start_scene", "first_scene")
+    end_keys = ("scene_end", "end_scene", "last_scene")
+    start = next((part.get(k) for k in start_keys if part.get(k) is not None), None)
+    end = next((part.get(k) for k in end_keys if part.get(k) is not None), None)
+
+    if start is not None or end is not None:
+        try:
+            start_i = max(1, int(start or 1))
+            end_i = int(end or len(top_level))
+            selected = [
+                scene for scene in top_level
+                if isinstance(scene, dict)
+                and start_i <= int(scene.get("scene_number", 0) or 0) <= end_i
+            ]
+            if selected:
+                return selected, f"top-level-range-{start_i}-{end_i}"
+        except (TypeError, ValueError):
+            pass
+
+    if part_count > 0 and len(top_level) % part_count == 0:
+        chunk = len(top_level) // part_count
+        begin = part_index * chunk
+        end = begin + chunk
+        return top_level[begin:end], f"top-level-even-split-{begin + 1}-{end}"
+
+    return [], "top-level-present-but-no-safe-mapping"
+
+
+def _normalize_parts(story):
+    """Return long-story parts while preserving enough source data to diagnose errors."""
     parts = story.get("parts")
 
     if isinstance(parts, list) and parts:
         normalized = []
-        for index, part in enumerate(parts, start=1):
-            if not isinstance(part, dict):
+        part_count = len(parts)
+        for index, raw_part in enumerate(parts, start=1):
+            if not isinstance(raw_part, dict):
                 normalized.append({
                     "part_no": index,
                     "part_title": f"Part {index}",
+                    "status": "PENDING",
                     "scenes": [],
+                    "_scene_source": "invalid-part-object",
+                    "_raw_scene_keys": [],
                 })
                 continue
 
-            part_no = part.get("part_no", index)
+            part_no = raw_part.get("part_no", raw_part.get("part_number", index))
             try:
                 part_no = int(part_no)
             except (TypeError, ValueError):
                 part_no = index
 
+            scenes, source = _extract_nested_scenes(raw_part)
+            if not scenes:
+                scenes, source = _extract_top_level_scenes_for_part(
+                    story, raw_part, index - 1, part_count
+                )
+
             normalized.append({
                 "part_no": part_no,
-                "part_title": str(part.get("part_title") or f"Part {part_no}").strip(),
-                "status": str(part.get("status") or "PENDING").upper(),
-                "scenes": part.get("scenes") or [],
+                "part_title": str(
+                    raw_part.get("part_title")
+                    or raw_part.get("title")
+                    or f"Part {part_no}"
+                ).strip(),
+                # NULL, missing, or blank status is an actionable PENDING part.
+                "status": str(raw_part.get("status") or "PENDING").strip().upper(),
+                "scenes": scenes,
+                "_scene_source": source,
+                "_raw_scene_keys": [
+                    k for k in raw_part.keys()
+                    if "scene" in str(k).lower()
+                ],
             })
 
         return sorted(normalized, key=lambda item: item["part_no"])
 
-    # Backwards-compatible fallback.
-    scenes = story.get("scenes") or []
+    scenes = _coerce_list(story.get("scenes"))
     if scenes:
         return [{
             "part_no": 1,
             "part_title": "Part 1",
             "status": "PENDING",
             "scenes": scenes,
+            "_scene_source": "legacy-top-level",
+            "_raw_scene_keys": ["scenes"],
         }]
 
     return []
 
 
 def _validate_part_scenes(part):
-    """Validate one part without allowing one bad part to stop the story."""
+    """Validate scenes while returning useful diagnostics instead of silently dropping data."""
     valid_scenes = []
-    scenes = part.get("scenes") or []
+    scenes = _coerce_list(part.get("scenes"))
+    invalid_reasons = []
 
-    for scene in scenes:
+    for scene_index, scene in enumerate(scenes, start=1):
         if not isinstance(scene, dict):
+            invalid_reasons.append(f"scene[{scene_index}] is not an object")
             continue
 
-        text = scene.get("text")
-        prompts = scene.get("sub_image_prompts")
+        text = scene.get("text") or scene.get("scene_text") or scene.get("narration")
+        prompts = (
+            scene.get("sub_image_prompts")
+            or scene.get("sub_image_prompt")
+            or scene.get("image_prompts")
+        )
 
         if not text:
+            invalid_reasons.append(f"scene[{scene_index}] missing text/scene_text/narration")
             continue
-        if not isinstance(prompts, list) or not prompts:
+        prompts = _coerce_list(prompts)
+        if not prompts:
+            invalid_reasons.append(f"scene[{scene_index}] has no image prompts")
             continue
 
         valid_prompts = []
-        for item in prompts:
+        for prompt_index, item in enumerate(prompts, start=1):
             if not isinstance(item, dict):
+                invalid_reasons.append(
+                    f"scene[{scene_index}] prompt[{prompt_index}] is not an object"
+                )
                 continue
-            image_prompt = item.get("scene_prompt") or item.get("image_prompt")
+            image_prompt = item.get("scene_prompt") or item.get("image_prompt") or item.get("prompt")
             if not isinstance(image_prompt, str) or not image_prompt.strip():
+                invalid_reasons.append(
+                    f"scene[{scene_index}] prompt[{prompt_index}] missing scene_prompt/image_prompt/prompt"
+                )
                 continue
 
             valid_prompts.append({
-                "text": str(item.get("text") or "").strip(),
+                "text": str(item.get("text") or item.get("sub_text") or "").strip(),
                 "image_prompt": image_prompt.strip(),
             })
 
         if not valid_prompts:
             continue
 
-        scene_number = scene.get("scene_number", len(valid_scenes) + 1)
+        scene_number = scene.get("scene_number", scene.get("scene_no", len(valid_scenes) + 1))
         try:
             scene_number = int(scene_number)
         except (TypeError, ValueError):
@@ -231,8 +341,7 @@ def _validate_part_scenes(part):
             "sub_image_prompts": valid_prompts,
         })
 
-    return valid_scenes
-
+    return valid_scenes, invalid_reasons
 
 def _initialize_part_results(story, parts):
     """Create/preserve part execution metadata; never reset completed/skipped parts."""
@@ -335,91 +444,222 @@ def update_part_status(story, part_no, status, extra_fields=None, retries=3):
 
 
 def get_story_from_mongodb():
-    """Claim one story and return ONLY its PENDING parts.
+    """Claim/resume a long suspense story according to the part state machine.
 
-    A story may be newly PENDING or already PROCESSING from an earlier run.
-    Completed/skipped/failed parts are not rebuilt unless their part status is
-    manually changed back to PENDING.
+    Rules:
+      1. Existing PROCESSING story with any NULL/missing/blank/PENDING part:
+         resume that story first and process its FIRST actionable part only.
+      2. If no resumable PROCESSING story exists, claim a top-level PENDING story.
+         A newly claimed PENDING story is a fresh run: every part is reset to
+         PENDING and ALL parts are returned for processing, including parts that
+         were previously SUCCESS/FAILED. This intentionally restarts the story.
+      3. NULL/missing/blank part status is always treated as PENDING.
+      4. PROCESSING + no actionable parts + one or more FAILED parts + all other
+         parts terminal => PARTIAL_COMPLETED is the final story state.
     """
     client, collection = get_mongodb_collection()
     try:
-        story = None
         now = datetime.now(timezone.utc)
-        if STORY_ID:
-            base_query = {"story_id": STORY_ID, "status": {"$in": ["PENDING", "PROCESSING", "FAILED", "PARTIAL_SUCCESS"]}}
-        else:
-            base_query = {"status": {"$in": ["PENDING", "PROCESSING", "FAILED", "PARTIAL_SUCCESS"]}}
+        story = None
+        resumed_processing = False
 
-        # First claim a new PENDING story.
-        query = dict(base_query)
-        query["status"] = "PENDING"
-        story = collection.find_one_and_update(
-            query,
-            {"$set": {"status": "PROCESSING", "overall_status": "PROCESSING", "processing_at": now, "updated_at": now}},
-            sort=[("story_no", 1), ("story_id", 1)],
-            return_document=ReturnDocument.AFTER,
+        if STORY_ID:
+            base_query = {"story_id": STORY_ID}
+        else:
+            base_query = {}
+
+        # ------------------------------------------------------------
+        # 1) ALWAYS RESUME AN EXISTING PROCESSING STORY FIRST.
+        # ------------------------------------------------------------
+        processing_query = dict(base_query)
+        processing_query["status"] = "PROCESSING"
+        candidates = collection.find(processing_query).sort(
+            [("processing_at", 1), ("story_no", 1), ("story_id", 1)]
         )
 
-        # If no new story exists, resume an existing PROCESSING story only if it has PENDING parts.
-        if not story:
-            query = dict(base_query)
-            query["status"] = "PROCESSING"
-            query["$or"] = [
-                {"parts": {"$elemMatch": {"status": "PENDING"}}},
-                {"part_results": {"$exists": True}},
+        for candidate in candidates:
+            raw_parts = candidate.get("parts")
+            if not isinstance(raw_parts, list):
+                continue
+
+            actionable = [
+                p for p in raw_parts
+                if isinstance(p, dict)
+                and str(p.get("status") or "PENDING").strip().upper() == "PENDING"
             ]
-            candidates = collection.find(query).sort([("story_no", 1), ("story_id", 1)])
-            for candidate in candidates:
-                parts_raw = candidate.get("parts") or []
-                pending_exists = any(str(p.get("status", "PENDING")).upper() == "PENDING" for p in parts_raw if isinstance(p, dict))
-                if pending_exists:
-                    story = candidate
-                    break
+            if actionable:
+                story = candidate
+                resumed_processing = True
+                break
+
+        # ------------------------------------------------------------
+        # 2) IF NOTHING IS PROCESSING, CLAIM A NEW PENDING STORY.
+        # ------------------------------------------------------------
+        if not story:
+            pending_query = dict(base_query)
+            pending_query["status"] = {"$in": ["PENDING", None, ""]}
+            story = collection.find_one_and_update(
+                pending_query,
+                {
+                    "$set": {
+                        "status": "PROCESSING",
+                        "overall_status": "PROCESSING",
+                        "processing_at": now,
+                        "updated_at": now,
+                    }
+                },
+                sort=[("story_no", 1), ("story_id", 1)],
+                return_document=ReturnDocument.AFTER,
+            )
 
         if not story:
-            print("ℹ️ No PENDING story or PROCESSING story with PENDING parts available.", flush=True)
+            print(
+                "ℹ️ No PROCESSING story with actionable parts and no new PENDING story available.",
+                flush=True,
+            )
             return None, []
 
         story_id = story.get("story_id") or story.get("id") or story.get("ID") or "unknown"
         title = str(story.get("title") or "Untitled Story").strip()
+        original_story_status = "PROCESSING" if resumed_processing else "PENDING"
+
+        # ------------------------------------------------------------
+        # DIAGNOSTIC STRUCTURE LOGGING
+        # ------------------------------------------------------------
+        raw_parts = story.get("parts")
+        print(f"🔎 Mongo story top-level keys: {sorted(str(k) for k in story.keys())}", flush=True)
+        print(
+            f"🔎 Mongo story status at selection: {original_story_status} -> PROCESSING",
+            flush=True,
+        )
+        print(
+            f"🔎 Mongo parts type/count: {type(raw_parts).__name__}/{len(raw_parts) if isinstance(raw_parts, list) else 0}",
+            flush=True,
+        )
+        if isinstance(raw_parts, list):
+            for raw_index, raw_part in enumerate(raw_parts[:50], start=1):
+                if isinstance(raw_part, dict):
+                    scene_keys = [k for k in raw_part.keys() if "scene" in str(k).lower()]
+                    raw_status = raw_part.get("status")
+                    print(
+                        f"🔎 Raw part {raw_index}: status={raw_status!r}; "
+                        f"keys={sorted(str(k) for k in raw_part.keys())}; "
+                        f"scene-related-keys={scene_keys}; "
+                        f"scenes_type={type(raw_part.get('scenes')).__name__}; "
+                        f"scenes_count={len(raw_part.get('scenes') or []) if isinstance(raw_part.get('scenes'), list) else 0}",
+                        flush=True,
+                    )
+                else:
+                    print(f"🔎 Raw part {raw_index}: type={type(raw_part).__name__}", flush=True)
+
+        top_scenes = story.get("scenes")
+        print(
+            f"🔎 Top-level scenes type/count: {type(top_scenes).__name__}/"
+            f"{len(top_scenes) if isinstance(top_scenes, list) else 0}",
+            flush=True,
+        )
+
         all_parts = _normalize_parts(story)
+
+        # ------------------------------------------------------------
+        # NEW PENDING STORY = FULL RESET / FULL PROCESS
+        # ------------------------------------------------------------
+        if not resumed_processing:
+            print(
+                "🆕 NEW PENDING STORY: resetting EVERY part to PENDING and "
+                "processing ALL parts in this run.",
+                flush=True,
+            )
+            for part in all_parts:
+                part["status"] = "PENDING"
+
         validated_all = []
         for part in all_parts:
+            valid_scenes, validation_errors = _validate_part_scenes(part)
             validated_all.append({
                 "part_no": part["part_no"],
                 "part_title": part["part_title"],
-                "status": str(part.get("status") or "PENDING").upper(),
-                "scenes": _validate_part_scenes(part),
+                "status": "PENDING" if not resumed_processing else str(
+                    part.get("status") or "PENDING"
+                ).strip().upper(),
+                "scenes": valid_scenes,
+                "_validation_errors": validation_errors,
+                "_scene_source": part.get("_scene_source", "unknown"),
+                "_raw_scene_keys": part.get("_raw_scene_keys", []),
             })
 
         part_results = _initialize_part_results(story, validated_all)
         collection.update_one(
             {"_id": story["_id"]},
-            {"$set": {"part_results": part_results, "overall_status": "PROCESSING", "status": "PROCESSING", "total_parts": len(validated_all), "updated_at": now}},
+            {
+                "$set": {
+                    "part_results": part_results,
+                    "overall_status": "PROCESSING",
+                    "status": "PROCESSING",
+                    "total_parts": len(validated_all),
+                    "updated_at": now,
+                }
+            },
         )
 
-        # Only return PENDING parts to the video pipeline.
-        pending_parts = [p for p in validated_all if p["status"] == "PENDING"]
+        # For a resumed PROCESSING story, process ONLY the first actionable
+        # part. For a newly PENDING story, process ALL parts.
+        if resumed_processing:
+            actionable = [
+                p for p in validated_all
+                if str(p.get("status") or "PENDING").strip().upper() == "PENDING"
+            ]
+            selected_parts = actionable[:1]
+        else:
+            selected_parts = validated_all
+
         story["part_results"] = part_results
         story["parts"] = validated_all
+        story["_resumed_processing"] = resumed_processing
+        story["_original_status"] = original_story_status
 
         print("==========================================", flush=True)
         print("✅ LONG STORY CLAIMED/RESUMED", flush=True)
         print(f"🆔 Story ID   : {story_id}", flush=True)
         print(f"📖 Title      : {title}", flush=True)
         print(f"🧩 Total parts: {len(validated_all)}", flush=True)
-        print(f"▶️ Pending parts to execute: {[p['part_no'] for p in pending_parts]}", flush=True)
+        print(
+            "▶️ Actionable parts (NULL/missing/PENDING): "
+            f"{[p['part_no'] for p in validated_all if str(p.get('status') or 'PENDING').strip().upper() == 'PENDING']}",
+            flush=True,
+        )
+        print(
+            f"▶️ Parts selected for THIS RUN: {[p['part_no'] for p in selected_parts]}",
+            flush=True,
+        )
+        print(
+            "🔁 Mode: " + ("RESUME PROCESSING (first actionable part)" if resumed_processing else "NEW PENDING (all parts)"),
+            flush=True,
+        )
         print("🔄 Status     : PROCESSING", flush=True)
         print("==========================================", flush=True)
 
-        for part in pending_parts:
+        for part in selected_parts:
             if not part["scenes"]:
+                print(f"❌ Part {part['part_no']} has 0 valid scenes.", flush=True)
+                print(f"   Scene source detected : {part.get('_scene_source')}", flush=True)
+                print(f"   Raw scene-related keys: {part.get('_raw_scene_keys')}", flush=True)
+                errors = part.get("_validation_errors") or []
+                if errors:
+                    for reason in errors[:10]:
+                        print(f"   • {reason}", flush=True)
+                else:
+                    print(
+                        "   • No scenes were found in the part or a safely mappable top-level story.scenes.",
+                        flush=True,
+                    )
+            else:
                 print(
-                    f"⚠️ Part {part['part_no']} has no scenes and will fail validation.",
+                    f"✅ Part {part['part_no']}: {len(part['scenes'])} valid scenes "
+                    f"(source={part.get('_scene_source')})",
                     flush=True,
                 )
 
-        return story, pending_parts
+        return story, selected_parts
     finally:
         client.close()
-
