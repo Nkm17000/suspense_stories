@@ -1,23 +1,35 @@
-"""MongoDB-backed Cloudflare account rotation and daily neuron ledger."""
+"""MongoDB-backed Cloudflare multi-account rotation with UTC-day quota state."""
+
 from datetime import datetime, timezone
 import os
-import time
 
 from .db import get_mongodb_collection
 
-NEURON_SWITCH_THRESHOLD = float(os.getenv("CLOUDFLARE_ACCOUNT_SWITCH_THRESHOLD", "8300"))
+# Hard safety ceiling requested for routing. Cloudflare's free allocation is
+# 10,000 neurons/day; stop selecting an account at 8,500.
+NEURON_SWITCH_THRESHOLD = 8500.0
 COLLECTION_NAME = os.getenv("CLOUDFLARE_USAGE_COLLECTION", "cloudflare_daily_usage")
 
 
+def _today_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _collection(client):
+    return client[os.getenv("MONGODB_DATABASE", "storydb")][COLLECTION_NAME]
+
+
 def _accounts_from_env():
+    """Read every configured numbered account, preserving numeric order."""
     accounts = []
-    count = int(os.getenv("CLOUDFLARE_ACCOUNT_COUNT", "3"))
-    for i in range(1, count + 1):
+    # Do not require ACCOUNT_COUNT; this prevents an old count setting from
+    # silently hiding configured accounts. Support up to 50 numbered pairs.
+    for i in range(1, 51):
         account_id = os.getenv(f"CLOUDFLARE_ACCOUNT_ID_{i}", "").strip()
         token = os.getenv(f"CLOUDFLARE_API_TOKEN_{i}", "").strip()
         if account_id and token:
             accounts.append({"index": i, "account_id": account_id, "token": token})
-    # Backward compatibility with the old single-account variables.
+
     if not accounts:
         account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
         token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
@@ -26,30 +38,66 @@ def _accounts_from_env():
     return accounts
 
 
-def _today():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _collection(client):
-    # get_mongodb_collection() returns the longstory collection. Use its database.
-    return client[os.getenv("MONGODB_DATABASE", "storydb")][COLLECTION_NAME]
-
-
 def ensure_indexes():
     client, _ = get_mongodb_collection()
     try:
         col = _collection(client)
-        col.create_index([("date_utc", 1), ("account_id", 1)], unique=True)
-        col.create_index([("date_utc", 1), ("neurons_used", 1)])
+        col.create_index(
+            [("date_utc", 1), ("account_id", 1)],
+            unique=True,
+            name="cloudflare_account_day_unique",
+        )
+    finally:
+        client.close()
+
+
+def _ensure_account_day(account_id):
+    day = _today_utc()
+    now = datetime.now(timezone.utc)
+    client, _ = get_mongodb_collection()
+    try:
+        _collection(client).update_one(
+            {"date_utc": day, "account_id": account_id},
+            {"$setOnInsert": {
+                "date_utc": day,
+                "account_id": account_id,
+                "neurons_used": 0.0,
+                "reserved_neurons": 0.0,
+                "image_count": 0,
+                "exhausted": False,
+                "exhausted_reason": None,
+                "created_at": now,
+            }},
+            upsert=True,
+        )
+    finally:
+        client.close()
+
+
+def get_account_status(account_id):
+    day = _today_utc()
+    _ensure_account_day(account_id)
+    client, _ = get_mongodb_collection()
+    try:
+        row = _collection(client).find_one({"date_utc": day, "account_id": account_id}) or {}
+        return {
+            "neurons_used": max(0.0, float(row.get("neurons_used", 0.0) or 0.0)),
+            "reserved_neurons": max(0.0, float(row.get("reserved_neurons", 0.0) or 0.0)),
+            "exhausted": bool(row.get("exhausted", False)),
+            "exhausted_reason": row.get("exhausted_reason"),
+        }
     finally:
         client.close()
 
 
 def get_account_statuses():
-    day = _today()
+    """Return all configured accounts and today's UTC state."""
+    ensure_indexes()
+    day = _today_utc()
     accounts = _accounts_from_env()
     if not accounts:
         return []
+
     client, _ = get_mongodb_collection()
     try:
         col = _collection(client)
@@ -57,115 +105,152 @@ def get_account_statuses():
         result = []
         for account in accounts:
             row = rows.get(account["account_id"], {})
-            used = float(row.get("neurons_used", 0.0))
+            used = max(0.0, float(row.get("neurons_used", 0.0) or 0.0))
+            reserved = max(0.0, float(row.get("reserved_neurons", 0.0) or 0.0))
+            exhausted = bool(row.get("exhausted", False))
             result.append({
                 **account,
                 "date_utc": day,
                 "neurons_used": used,
-                "remaining_to_threshold": max(0.0, NEURON_SWITCH_THRESHOLD - used),
-                "available": used <= NEURON_SWITCH_THRESHOLD,
+                "reserved_neurons": reserved,
+                "exhausted": exhausted,
+                "exhausted_reason": row.get("exhausted_reason"),
+                "remaining_to_threshold": max(0.0, NEURON_SWITCH_THRESHOLD - used - reserved),
+                "available": (not exhausted) and (used + reserved < NEURON_SWITCH_THRESHOLD),
             })
         return result
     finally:
         client.close()
 
 
+def mark_account_exhausted(account_id, reason="CLOUDFLARE_429_4006"):
+    """Mark account exhausted for this UTC day. It will not be selected again until the next UTC date."""
+    day = _today_utc()
+    now = datetime.now(timezone.utc)
+    client, _ = get_mongodb_collection()
+    try:
+        _collection(client).update_one(
+            {"date_utc": day, "account_id": account_id},
+            {"$set": {
+                "exhausted": True,
+                "exhausted_reason": reason,
+                "exhausted_at": now,
+                "updated_at": now,
+            }},
+            upsert=True,
+        )
+    finally:
+        client.close()
+    print(f"🚫 Cloudflare account {account_id} marked EXHAUSTED for UTC day {day}: {reason}", flush=True)
+
+
 def reserve_neurons(account_id, estimated_neurons):
-    """Atomically reserve estimated neurons only when daily usage stays <= threshold."""
-    day = _today()
+    """Atomically reserve capacity only for a non-exhausted account."""
+    day = _today_utc()
     value = max(0.0, float(estimated_neurons))
+    now = datetime.now(timezone.utc)
+    if value > NEURON_SWITCH_THRESHOLD:
+        return False
+
+    _ensure_account_day(account_id)
     client, _ = get_mongodb_collection()
     try:
         col = _collection(client)
-        now = datetime.now(timezone.utc)
-        # Create today's row first; then reserve atomically.
-        col.update_one(
-            {"date_utc": day, "account_id": account_id},
-            {"$setOnInsert": {"date_utc": day, "account_id": account_id, "neurons_used": 0.0, "created_at": now}},
-            upsert=True,
-        )
-        query = {
-            "date_utc": day,
-            "account_id": account_id,
-            "$expr": {"$lte": [{"$add": [{"$ifNull": ["$neurons_used", 0]}, value]}, NEURON_SWITCH_THRESHOLD]},
-        }
-        update = {
-            "$setOnInsert": {
+        result = col.update_one(
+            {
                 "date_utc": day,
                 "account_id": account_id,
-                "created_at": now,
+                "exhausted": {"$ne": True},
+                "$expr": {
+                    "$lte": [
+                        {"$add": [
+                            {"$ifNull": ["$neurons_used", 0.0]},
+                            {"$ifNull": ["$reserved_neurons", 0.0]},
+                            value,
+                        ]},
+                        NEURON_SWITCH_THRESHOLD,
+                    ]
+                },
             },
-            "$inc": {"neurons_used": value, "reserved_neurons": value},
-            "$set": {"updated_at": now},
-        }
-        result = col.update_one(query, update, upsert=False)
-        if result.modified_count == 1 or result.upserted_id is not None:
-            return True
-        return False
+            {"$inc": {"reserved_neurons": value}, "$set": {"updated_at": now}},
+        )
+        return result.modified_count == 1
     finally:
         client.close()
 
 
 def release_reserved_neurons(account_id, estimated_neurons):
-    """Release a reservation when an image request failed before producing an image."""
+    """Release only the active reservation; never clear exhausted state."""
+    day = _today_utc()
     value = max(0.0, float(estimated_neurons))
+    now = datetime.now(timezone.utc)
     client, _ = get_mongodb_collection()
     try:
-        col = _collection(client)
-        col.update_one(
-            {"date_utc": _today(), "account_id": account_id},
-            {"$inc": {"neurons_used": -value, "reserved_neurons": -value},
-             "$set": {"updated_at": datetime.now(timezone.utc)}},
+        _collection(client).update_one(
+            {"date_utc": day, "account_id": account_id},
+            {"$inc": {"reserved_neurons": -value}, "$set": {"updated_at": now}},
         )
     finally:
         client.close()
 
 
-def adjust_neurons(account_id, estimated_neurons, reported_neurons):
-    """Adjust the ledger if Cloudflare reports a different neuron count."""
-    delta = float(reported_neurons) - float(estimated_neurons)
-    if abs(delta) < 0.0001:
-        return
+def settle_reserved_neurons(account_id, estimated_neurons, actual_neurons):
+    day = _today_utc()
+    estimated = max(0.0, float(estimated_neurons))
+    actual = max(0.0, float(actual_neurons))
+    delta = actual - estimated
+    now = datetime.now(timezone.utc)
     client, _ = get_mongodb_collection()
     try:
-        col = _collection(client)
-        col.update_one(
-            {"date_utc": _today(), "account_id": account_id},
-            {"$inc": {"neurons_used": delta},
-             "$set": {"updated_at": datetime.now(timezone.utc)}},
+        inc = {"reserved_neurons": -estimated, "neurons_used": actual}
+        _collection(client).update_one(
+            {"date_utc": day, "account_id": account_id},
+            {"$inc": inc, "$set": {"updated_at": now}},
         )
     finally:
         client.close()
 
 
 def record_image(account_id, neurons, source, story_id=None, part_no=None):
+    day = _today_utc()
+    now = datetime.now(timezone.utc)
     client, _ = get_mongodb_collection()
     try:
-        col = _collection(client)
-        now = datetime.now(timezone.utc)
         inc = {"image_count": 1}
         if source == "reported":
             inc["reported_neurons"] = float(neurons)
         else:
             inc["estimated_neurons"] = float(neurons)
-        col.update_one(
-            {"date_utc": _today(), "account_id": account_id},
-            {"$inc": inc, "$set": {"updated_at": now}, "$setOnInsert": {"created_at": now}},
+        item = {
+            "story_id": story_id,
+            "part_no": part_no,
+            "neurons": float(neurons),
+            "source": source,
+            "at": now,
+        }
+        _collection(client).update_one(
+            {"date_utc": day, "account_id": account_id},
+            {"$inc": inc, "$push": {"recent_usage": {"$each": [item], "$slice": -100}}, "$set": {"updated_at": now}},
             upsert=True,
         )
-        if story_id is not None:
-            col.update_one(
-                {"date_utc": _today(), "account_id": account_id},
-                {"$push": {"recent_usage": {"story_id": story_id, "part_no": part_no, "neurons": float(neurons), "source": source, "at": now}}},
-            )
     finally:
         client.close()
 
 
-def choose_account(estimated_neurons):
-    """Pick the first account with enough remaining daily capacity."""
-    ensure_indexes()
+def choose_account(estimated_neurons, excluded_account_ids=None):
+    """Reserve the first eligible account, skipping exhausted/previously tried accounts."""
+    excluded = set(excluded_account_ids or set())
     for account in get_account_statuses():
+        if account["account_id"] in excluded:
+            continue
+        if account["exhausted"]:
+            print(f"⏭️ Skipping Cloudflare account {account['index']} - exhausted for {_today_utc()} UTC", flush=True)
+            continue
         if reserve_neurons(account["account_id"], estimated_neurons):
+            account["reserved_neurons"] += float(estimated_neurons)
+            account["remaining_to_threshold"] = max(
+                0.0,
+                NEURON_SWITCH_THRESHOLD - account["neurons_used"] - account["reserved_neurons"],
+            )
             return account
     return None

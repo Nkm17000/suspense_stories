@@ -10,7 +10,7 @@ from moviepy.editor import (
 )
 from moviepy.audio.AudioClip import AudioArrayClip
 
-from .config import MIN_DURATION, VIDEO_SIZE, IMAGE_PROMPT_PREFIX
+from .config import MIN_DURATION, VIDEO_SIZE
 from .voice import clean_tts_text, generate_voice
 from .image_generator import generate_image
 from .branding import create_fullscreen_clip
@@ -185,7 +185,8 @@ def _apply_ken_burns(
 def create_scene(
     scene,
     index,
-    part_no=1
+    part_no=1,
+    story_id=None
 ):
 
     part_no = int(part_no)
@@ -268,16 +269,6 @@ def create_scene(
         )
 
         image_prompt = item.get("scene_prompt") or item.get("image_prompt")
-
-        if not image_prompt or not str(image_prompt).strip():
-            raise ValueError(
-                f"❌ Scene {scene_number}, image {prompt_index} has an empty image_prompt"
-            )
-
-        image_prompt = str(image_prompt).strip()
-        if not image_prompt.startswith(IMAGE_PROMPT_PREFIX):
-            image_prompt = IMAGE_PROMPT_PREFIX + image_prompt
-        item["_final_image_prompt"] = image_prompt
 
         print(
             f"   🖼️ Image "
@@ -476,17 +467,13 @@ def create_scene(
         start=1
     ):
 
-        image_prompt = item.get("_final_image_prompt") or item.get("scene_prompt") or item.get("image_prompt")
+        image_prompt = item.get("scene_prompt") or item.get("image_prompt")
 
         if not image_prompt:
             raise ValueError(
                 f"❌ Scene {scene_number}, image "
                 f"{prompt_index} has an empty image_prompt"
             )
-
-        image_prompt = str(image_prompt).strip()
-        if not image_prompt.startswith(IMAGE_PROMPT_PREFIX):
-            image_prompt = IMAGE_PROMPT_PREFIX + image_prompt
 
         img_path = (
             os.path.join(
@@ -504,7 +491,9 @@ def create_scene(
         img = generate_image(
             image_prompt,
             img_path,
-            text
+            text,
+            story_id=story_id,
+            part_no=part_no,
         )
 
         if not img:

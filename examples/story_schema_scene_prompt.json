@@ -1,0 +1,36 @@
+{
+  "story_id": "कहानी_001",
+  "title": "जिस दिन मीरा ने डर को पीछे छोड़ दिया",
+  "status": "PENDING",
+  "category": "आत्मविश्वास और जीवन की सीख",
+  "language": "hi",
+  "style": "Cinematic, cartoon-realistic avatar, detailed, natural pose, realistic lighting, soft shadows, warm Indian atmosphere",
+  "characters": {
+    "MAIN": {
+      "id": "meera123@29",
+      "name": "Meera",
+      "description": "29-year-old Indian woman, medium-brown skin, oval face, dark brown eyes, long black hair tied in a simple braid, slim build, wearing a pale-yellow cotton kurta, navy-blue salwar and small silver earrings."
+    },
+    "SUPPORT": {
+      "id": "sarla456@45",
+      "name": "Sarla",
+      "description": "45-year-old Indian woman, warm brown skin, round face, dark brown eyes, black hair with a few gray strands tied in a bun, medium build, wearing a simple maroon sari and thin gold earrings."
+    }
+  },
+  "scenes": [
+    {
+      "scene_number": 1,
+      "text": "मीरा एक छोटे शहर के साधारण घर में रहती थी। उसे चित्र बनाना बहुत पसंद था, लेकिन वह अपने बनाए चित्र किसी को दिखाने से डरती थी।",
+      "sub_image_prompts": [
+        {
+          "text": "मीरा अपने कमरे में चित्र बनाती हुई",
+          "scene_prompt": "Meera is sitting at a small wooden table inside a simple Indian home, drawing carefully in a sketchbook. She looks focused but slightly nervous. Morning light enters through a nearby window."
+        },
+        {
+          "text": "मीरा अपना चित्र छिपाती हुई",
+          "scene_prompt": "Meera quietly closes her sketchbook and places it inside a wooden drawer, looking hesitant and worried. The room is simple and modest, with everyday Indian household details."
+        }
+      ]
+    }
+  ]
+}

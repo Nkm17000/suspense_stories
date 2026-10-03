@@ -1,0 +1,111 @@
+name: Cleanup GitHub Actions Artifacts
+
+on:
+  # Run automatically once every day
+  schedule:
+    - cron: "0 3 * * *"
+
+  # Allow manual execution
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    name: Delete Artifacts Older Than 4 Hours
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete all artifacts older than 4 hours
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const FOUR_HOURS = 4 * 60 * 60 * 1000;
+            const cutoffTime = Date.now() - FOUR_HOURS;
+
+            let checked = 0;
+            let deleted = 0;
+            let failed = 0;
+
+            console.log("======================================");
+            console.log("GitHub Actions Artifact Cleanup");
+            console.log("======================================");
+            console.log(
+              `Deleting artifacts created before: ${new Date(cutoffTime).toISOString()}`
+            );
+            console.log("");
+
+            for (let page = 1; page <= 100; page++) {
+
+              const response =
+                await github.rest.actions.listArtifactsForRepo({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  per_page: 100,
+                  page: page
+                });
+
+              const artifacts = response.data.artifacts;
+
+              if (artifacts.length === 0) {
+                break;
+              }
+
+              for (const artifact of artifacts) {
+
+                checked++;
+
+                const createdTime =
+                  new Date(artifact.created_at).getTime();
+
+                console.log(
+                  `Checking: ${artifact.name} | Created: ${artifact.created_at}`
+                );
+
+                if (createdTime < cutoffTime) {
+
+                  console.log(
+                    `DELETE: ${artifact.name} | ID: ${artifact.id}`
+                  );
+
+                  try {
+
+                    await github.rest.actions.deleteArtifact({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      artifact_id: artifact.id
+                    });
+
+                    deleted++;
+
+                    console.log(
+                      `✓ Deleted: ${artifact.name}`
+                    );
+
+                  } catch (error) {
+
+                    failed++;
+
+                    console.log(
+                      `✗ Failed: ${artifact.name}`
+                    );
+
+                    console.log(error.message);
+                  }
+                }
+              }
+
+              if (artifacts.length < 100) {
+                break;
+              }
+            }
+
+            console.log("");
+            console.log("======================================");
+            console.log("Cleanup Complete");
+            console.log("======================================");
+            console.log(`Artifacts checked : ${checked}`);
+            console.log(`Artifacts deleted : ${deleted}`);
+            console.log(`Delete failures   : ${failed}`);
+            console.log("======================================");

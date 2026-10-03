@@ -1,0 +1,54 @@
+{
+  "story_id": "कहानी_001",
+  "title": "आईने के सामने लिया फैसला",
+  "status": "PENDING",
+  "category": "आत्मविश्वास और जीवन की सीख",
+  "language": "hi",
+  "style": "Cinematic, cartoon-realistic avatar, detailed, natural pose, realistic lighting, soft shadows",
+  "characters": {
+    "MAIN": {
+      "id": "meera123@32",
+      "name": "Meera",
+      "description": "29-year-old Indian girl, medium-brown skin, long black hair tied in a simple braid, dark brown eyes, slim build, wearing a pale-yellow cotton kurta and navy-blue salwar, small silver earrings."
+    },
+    "SUPPORT": {
+      "id": "sarla456@45",
+      "name": "Sarla",
+      "description": "45-year-old Indian woman, warm brown skin, black hair with a few gray strands tied in a bun, medium build, dark brown eyes, wearing a simple maroon sari and thin gold earrings."
+    }
+  },
+  "scenes": [
+    {
+      "scene_number": 1,
+      "text": "मीरा एक छोटे शहर के साधारण घर में रहती थी। उसे चित्र बनाना बहुत पसंद था, लेकिन वह अपने बनाए चित्र किसी को दिखाने से डरती थी।",
+      "sub_image_prompts": [
+        {
+          "text": "मीरा चित्र बनाती हुई",
+          "scene_prompt": "Meera is sitting on a wooden chair inside a simple Indian home, quietly drawing in a sketchbook near a window, looking thoughtful and slightly emotional."
+        },
+        {
+          "text": "मीरा अपना चित्र छिपाती हुई",
+          "scene_prompt": "Meera quietly closes her sketchbook and places it inside a wooden drawer, looking nervous and hesitant, with the same home interior visible around her."
+        }
+      ]
+    },
+    {
+      "scene_number": 2,
+      "text": "अगले दिन सरला ने मीरा से पूछा कि वह अपने चित्र दूसरों को क्यों नहीं दिखाती।",
+      "sub_image_prompts": [
+        {
+          "text": "सरला मीरा से बात करती हुई",
+          "scene_prompt": "Meera is sitting with Sarla in the same simple Indian home, listening carefully as Sarla speaks to her with a warm encouraging expression."
+        },
+        {
+          "text": "मीरा आत्मविश्वास से मुस्कुराती हुई",
+          "scene_prompt": "Meera stands near the window holding her sketchbook, looking calmer and more confident after speaking with Sarla."
+        }
+      ]
+    }
+  ],
+  "ending_message": "कभी-कभी सबसे बड़ा कदम दुनिया के सामने नहीं, बल्कि अपने डर के सामने उठाना पड़ता है।",
+  "voiceover_style": "warm emotional Hindi voice",
+  "music_style": "soft cinematic inspirational music",
+  "cta": "ऐसी प्रेरणादायक कहानियों के लिए हमें फॉलो करें।"
+}

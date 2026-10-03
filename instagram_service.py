@@ -17,6 +17,8 @@ GRAPH_BASE = f"https://graph.facebook.com/{META_GRAPH_VERSION}"
 
 PUBLISHING_LIMIT_CODE = 9
 PUBLISHING_LIMIT_SUBCODES = {2207069}
+INSTAGRAM_UPLOAD_MAX_ATTEMPTS = 3
+INSTAGRAM_UPLOAD_RETRY_DELAYS = (10, 20)
 
 
 def _require_config():
@@ -275,7 +277,7 @@ def _publish_container(container_id):
 
 
 def publish_video_to_instagram(video_path, caption):
-    """Publish one local MP4 as an Instagram Reel."""
+    """Publish one local MP4 as an Instagram Reel with up to 3 upload attempts."""
     _require_config()
     _validate_account()
 
@@ -283,10 +285,39 @@ def publish_video_to_instagram(video_path, caption):
         print("⏭️ Skipping Instagram publish because the Content Publishing limit is exhausted.", flush=True)
         return None
 
-    container_id, upload_uri = _create_resumable_container(caption)
-    if not container_id or not upload_uri:
-        return None
+    last_error = None
 
-    _upload_video(upload_uri, video_path)
-    _wait_until_ready(container_id)
-    return _publish_container(container_id)
+    for attempt in range(1, INSTAGRAM_UPLOAD_MAX_ATTEMPTS + 1):
+        container_id = None
+        try:
+            print(
+                f"📤 Instagram video upload attempt {attempt}/{INSTAGRAM_UPLOAD_MAX_ATTEMPTS}",
+                flush=True,
+            )
+
+            # Create a fresh resumable container for every attempt.
+            # An upload URI belongs to its container and should not be reused
+            # after a failed binary upload.
+            container_id, upload_uri = _create_resumable_container(caption)
+            if not container_id or not upload_uri:
+                return None
+
+            _upload_video(upload_uri, video_path)
+            _wait_until_ready(container_id)
+            return _publish_container(container_id)
+
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"❌ Instagram upload attempt {attempt}/{INSTAGRAM_UPLOAD_MAX_ATTEMPTS} failed: {exc}",
+                flush=True,
+            )
+
+            if attempt < INSTAGRAM_UPLOAD_MAX_ATTEMPTS:
+                delay = INSTAGRAM_UPLOAD_RETRY_DELAYS[attempt - 1]
+                print(f"⏳ Waiting {delay} seconds before Instagram retry...", flush=True)
+                time.sleep(delay)
+
+    raise RuntimeError(
+        f"Instagram video upload failed after {INSTAGRAM_UPLOAD_MAX_ATTEMPTS} attempts: {last_error}"
+    ) from last_error

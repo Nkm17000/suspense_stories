@@ -16,14 +16,6 @@ TITLE_TEMPLATE_PATH = os.getenv("TITLE_TEMPLATE_PATH", "assets/title_page_templa
 
 TITLE_TEMPLATE_CROP = (0.0432, 0.0262, 0.8811, 0.9692)
 
-# Hard-coded image style prefix applied to every scene image prompt.
-# This forces the image model toward stylized cartoon characters rather than
-# photorealistic/real human characters. Change this single value to change
-# the visual character style for the entire pipeline.
-IMAGE_PROMPT_PREFIX = (
-    "Create this scene as not photorealistic humans and not real people. "
-)
-
 MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
 DATABASE_NAME = os.getenv("MONGODB_DATABASE", "storydb").strip()
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "longstory").strip()

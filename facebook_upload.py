@@ -67,6 +67,10 @@ STORY_ID = os.getenv(
     ""
 ).strip()
 
+# Retry Facebook video uploads up to 3 times.
+FACEBOOK_UPLOAD_MAX_ATTEMPTS = 3
+FACEBOOK_UPLOAD_RETRY_DELAYS = (10, 20)
+
 
 # ============================================================
 # VALIDATION
@@ -304,48 +308,84 @@ def upload_video(
         "published": True
     }
 
-    try:
-        with validate_video_path.open("rb") as video:
-            response = requests.post(
-                endpoint,
-                params=params,
-                data=data,
-                files={
-                    "source": (
-                        validate_video_path.name,
-                        video,
-                        "video/mp4",
-                    )
-                },
-                timeout=1800,
+    last_error = None
+
+    for attempt in range(1, FACEBOOK_UPLOAD_MAX_ATTEMPTS + 1):
+        print(
+            f"📤 Facebook video upload attempt {attempt}/{FACEBOOK_UPLOAD_MAX_ATTEMPTS}",
+            flush=True,
+        )
+
+        try:
+            # Re-open the local MP4 for every attempt so each request starts
+            # with a fresh file stream.
+            with validate_video_path.open("rb") as video:
+                response = requests.post(
+                    endpoint,
+                    params=params,
+                    data=data,
+                    files={
+                        "source": (
+                            validate_video_path.name,
+                            video,
+                            "video/mp4",
+                        )
+                    },
+                    timeout=1800,
+                )
+        except requests.RequestException as exc:
+            last_error = RuntimeError(
+                f"Facebook upload request failed: {exc}"
             )
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            f"Facebook upload request failed: {exc}"
-        ) from exc
+            print(
+                f"❌ Facebook upload attempt {attempt}/{FACEBOOK_UPLOAD_MAX_ATTEMPTS} failed: {exc}",
+                flush=True,
+            )
+        else:
+            print(f"Facebook HTTP status: {response.status_code}", flush=True)
 
-    print(f"Facebook HTTP status: {response.status_code}", flush=True)
+            try:
+                result = response.json()
+            except ValueError:
+                result = {"raw_response": response.text}
 
-    try:
-        result = response.json()
-    except ValueError:
-        result = {"raw_response": response.text}
+            if response.ok:
+                video_id = result.get("id")
+                if video_id:
+                    print("==========================================", flush=True)
+                    print("✅ Facebook video uploaded successfully", flush=True)
+                    print(f"Facebook video ID: {video_id}", flush=True)
+                    print("==========================================", flush=True)
+                    return video_id
 
-    if not response.ok:
-        print("❌ Facebook API response:", result, flush=True)
-        raise RuntimeError("Facebook video upload failed.")
+                last_error = RuntimeError(
+                    "Facebook upload did not return a video ID."
+                )
+                print("❌ Facebook returned no video ID.", flush=True)
+                print("Response:", result, flush=True)
+            else:
+                print("❌ Facebook API response:", result, flush=True)
+                last_error = RuntimeError(
+                    f"Facebook video upload failed: HTTP {response.status_code}: {result}"
+                )
 
-    video_id = result.get("id")
-    if not video_id:
-        print("❌ Facebook returned no video ID.", flush=True)
-        print("Response:", result, flush=True)
-        raise RuntimeError("Facebook upload did not return a video ID.")
+            print(
+                f"❌ Facebook upload attempt {attempt}/{FACEBOOK_UPLOAD_MAX_ATTEMPTS} failed: {last_error}",
+                flush=True,
+            )
 
-    print("==========================================", flush=True)
-    print("✅ Facebook video uploaded successfully", flush=True)
-    print(f"Facebook video ID: {video_id}", flush=True)
-    print("==========================================", flush=True)
-    return video_id
+        if attempt < FACEBOOK_UPLOAD_MAX_ATTEMPTS:
+            delay = FACEBOOK_UPLOAD_RETRY_DELAYS[attempt - 1]
+            print(
+                f"⏳ Waiting {delay} seconds before Facebook retry...",
+                flush=True,
+            )
+            import time
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"Facebook video upload failed after {FACEBOOK_UPLOAD_MAX_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
 
 
 # ============================================================

@@ -1,4 +1,4 @@
-"""AI image generation with Cloudflare Workers AI as primary and Pollinations as fallback."""
+"""AI image generation with multi-account Cloudflare Workers AI and Pollinations fallback."""
 
 import base64
 import json
@@ -13,19 +13,19 @@ from PIL import Image, ImageDraw
 
 from .config import VIDEO_SIZE
 from .fonts import get_unicode_font
+from .cloudflare_accounts import (
+    choose_account,
+    settle_reserved_neurons,
+    release_reserved_neurons,
+    record_image,
+    mark_account_exhausted,
+    NEURON_SWITCH_THRESHOLD,
+)
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
-
-CLOUDFLARE_ACCOUNT_ID = os.getenv(
-    "CLOUDFLARE_ACCOUNT_ID", ""
-).strip()
-
-CLOUDFLARE_API_TOKEN = os.getenv(
-    "CLOUDFLARE_API_TOKEN", ""
-).strip()
 
 CLOUDFLARE_MODEL = os.getenv(
     "CLOUDFLARE_IMAGE_MODEL",
@@ -65,18 +65,10 @@ CLOUDFLARE_NEURONS_PER_STEP = float(
     os.getenv("CLOUDFLARE_NEURONS_PER_STEP", "9.6")
 )
 
-# Cloudflare currently provides a 10,000-neuron daily free allocation.
-# The REST inference response does not expose a documented daily-remaining
-# counter, so this project keeps a persistent UTC-day ledger. If an API
-# response ever contains an explicit neuron count, that value is used.
-CLOUDFLARE_DAILY_NEURON_LIMIT = float(
-    os.getenv("CLOUDFLARE_DAILY_NEURON_LIMIT", "10000")
-)
-CLOUDFLARE_POLLINATIONS_THRESHOLD = float(
-    os.getenv("CLOUDFLARE_POLLINATIONS_THRESHOLD", "200")
-)
-DAILY_USAGE_DIR = os.getenv("CLOUDFLARE_DAILY_USAGE_DIR", "logs")
-
+# Cloudflare's REST image response normally does not expose a documented
+# per-request neuron count, so routing uses the exact published FLUX.1
+# Schnell neuron formula configured below. MongoDB is the persistent
+# account/day ledger used for multi-account routing.
 _USAGE = {
     "story_id": None,
     "story_title": None,
@@ -179,98 +171,6 @@ def _record_image_usage(
         _USAGE["local_fallbacks"] += 1
 
 
-def _utc_day_key():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _daily_usage_path(day=None):
-    day = day or _utc_day_key()
-    os.makedirs(DAILY_USAGE_DIR, exist_ok=True)
-    return os.path.join(
-        DAILY_USAGE_DIR,
-        f"cloudflare_daily_usage_{day}.json",
-    )
-
-
-def _load_daily_usage(day=None):
-    day = day or _utc_day_key()
-    path = _daily_usage_path(day)
-    if os.path.isfile(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("date_utc") == day:
-                return data
-        except Exception:
-            pass
-    return {
-        "date_utc": day,
-        "daily_limit_neurons": CLOUDFLARE_DAILY_NEURON_LIMIT,
-        "cloudflare_neurons_used": 0.0,
-        "cloudflare_images": 0,
-        "estimated_neurons": 0.0,
-        "reported_neurons": 0.0,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "note": "Local ledger. Cloudflare dashboard is authoritative.",
-    }
-
-
-def _save_daily_usage(data):
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path = _daily_usage_path(data.get("date_utc"))
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return path
-
-
-def get_daily_cloudflare_status():
-    """Return the persisted UTC-day neuron ledger and remaining allowance."""
-    data = _load_daily_usage()
-    used = max(0.0, float(data.get("cloudflare_neurons_used", 0.0)))
-    limit = max(0.0, float(data.get("daily_limit_neurons", CLOUDFLARE_DAILY_NEURON_LIMIT)))
-    remaining = max(0.0, limit - used)
-    return {
-        **data,
-        "cloudflare_neurons_remaining": round(remaining, 2),
-        "pollinations_threshold": CLOUDFLARE_POLLINATIONS_THRESHOLD,
-        "cloudflare_allowed_by_threshold": remaining > CLOUDFLARE_POLLINATIONS_THRESHOLD,
-        "usage_file": _daily_usage_path(data.get("date_utc")),
-    }
-
-
-def _record_daily_cloudflare_neurons(neurons, source):
-    data = _load_daily_usage()
-    value = max(0.0, float(neurons))
-    data["cloudflare_neurons_used"] = round(
-        float(data.get("cloudflare_neurons_used", 0.0)) + value,
-        4,
-    )
-    data["cloudflare_images"] = int(data.get("cloudflare_images", 0)) + 1
-    if source == "reported":
-        data["reported_neurons"] = round(
-            float(data.get("reported_neurons", 0.0)) + value,
-            4,
-        )
-    else:
-        data["estimated_neurons"] = round(
-            float(data.get("estimated_neurons", 0.0)) + value,
-            4,
-        )
-    return _save_daily_usage(data)
-
-
-def _print_daily_cloudflare_status(prefix="📅 Cloudflare daily status"):
-    status = get_daily_cloudflare_status()
-    print(
-        f"{prefix} | UTC {status['date_utc']} | "
-        f"used={status['cloudflare_neurons_used']:.2f} | "
-        f"remaining={status['cloudflare_neurons_remaining']:.2f} | "
-        f"threshold={CLOUDFLARE_POLLINATIONS_THRESHOLD:.2f}",
-        flush=True,
-    )
-    return status
-
-
 def get_usage_summary():
     """Return the current story image/neuron accounting."""
     estimated = round(_USAGE["estimated_cloudflare_neurons"], 2)
@@ -367,126 +267,213 @@ def _log_final_api_prompt(prompt, provider="cloudflare"):
     return path
 
 
-def _generate_cloudflare(prompt, path):
-    """Generate an image using Cloudflare Workers AI."""
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+def _generate_cloudflare(prompt, path, story_id=None, part_no=None):
+    """Try every eligible Cloudflare account before returning to Pollinations.
+
+    Rules:
+      * Account order is 1, 2, 3, ...
+      * A 429 containing Cloudflare quota error 4006 (or the daily-allocation
+        message) marks that account exhausted for the current UTC date.
+      * An exhausted account is never called again on that UTC date.
+      * After an exhausted account, immediately try the next account.
+      * If every configured account has been checked/excluded/unavailable,
+        return False so generate_image() calls Pollinations.
+    """
+    estimated = _estimated_cloudflare_neurons()
+    excluded_accounts = set()
+    attempts_total = 0
+
+    while True:
+        account = choose_account(
+            estimated,
+            excluded_account_ids=excluded_accounts,
+        )
+
+        if not account:
+            print(
+                f"❌ All configured Cloudflare accounts checked/unavailable "
+                f"for this image. Tried={len(excluded_accounts)}; "
+                "switching to Pollinations.",
+                flush=True,
+            )
+            return False
+
+        account_id = account["account_id"]
+        token = account["token"]
+        account_index = account["index"]
+        excluded_accounts.add(account_id)
+
+        api_url = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/run/{CLOUDFLARE_MODEL}"
+        )
+        payload = {"prompt": prompt, "steps": CLOUDFLARE_STEPS}
+
+        prompt_log_path = _log_final_api_prompt(
+            prompt, provider=f"cloudflare_account_{account_index}"
+        )
+        print(f"📝 Final Cloudflare API prompt logged: {prompt_log_path}", flush=True)
+        print(f"☁️ Trying Cloudflare account {account_index} ({account_id})", flush=True)
         print(
-            "ℹ️ Cloudflare credentials are not configured; "
-            "skipping to Pollinations fallback.",
+            f"📊 Account {account_index}: reserved/used={account['neurons_used']:.2f}, "
+            f"threshold={NEURON_SWITCH_THRESHOLD:.2f}",
             flush=True,
         )
-        return False
 
-    api_url = (
-        "https://api.cloudflare.com/client/v4/accounts/"
-        f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/"
-        f"{CLOUDFLARE_MODEL}"
-    )
+        account_success = False
+        reservation_released = False
+        quota_exhausted = False
 
-    payload = {
-        "prompt": prompt,
-        "steps": CLOUDFLARE_STEPS,
-    }
+        # Retry transient errors on the SAME account, but NEVER retry a quota
+        # exhausted account.  A 429/4006 immediately moves to the next account.
+        for attempt in range(1, CLOUDFLARE_RETRIES + 1):
+            attempts_total += 1
+            _USAGE["cloudflare_attempts"] += 1
 
-    prompt_log_path = _log_final_api_prompt(prompt, provider="cloudflare")
-    print(
-        f"📝 Final Cloudflare API prompt logged: {prompt_log_path}",
-        flush=True,
-    )
-    print("📝 FINAL IMAGE PROMPT SENT TO CLOUDFLARE:", flush=True)
-    print(f"   {prompt}", flush=True)
-
-    for attempt in range(1, CLOUDFLARE_RETRIES + 1):
-        _USAGE["cloudflare_attempts"] += 1
-        try:
             print(
-                f"☁️ Cloudflare image attempt "
+                f"☁️ Cloudflare account {account_index} attempt "
                 f"{attempt}/{CLOUDFLARE_RETRIES}",
                 flush=True,
             )
 
-            response = requests.post(
-                api_url,
-                headers={
-                    "Authorization": (
-                        f"Bearer {CLOUDFLARE_API_TOKEN}"
-                    ),
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=CLOUDFLARE_TIMEOUT,
-            )
+            try:
+                response = requests.post(
+                    api_url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=CLOUDFLARE_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                print(f"⚠️ Cloudflare account {account_index} request failed: {exc}", flush=True)
+                if attempt < CLOUDFLARE_RETRIES:
+                    time.sleep(2)
+                    continue
+                break
+
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = response.text[:2000]
 
             if response.status_code == 200:
                 try:
                     _save_cloudflare_image(response, path)
-                    response_data = response.json()
+                    response_data = error_data
                     reported = _extract_reported_neurons(response_data)
-                    neurons = (
-                        reported
-                        if reported is not None
-                        else _estimated_cloudflare_neurons()
-                    )
+                    neurons = reported if reported is not None else estimated
                     source = "reported" if reported is not None else "estimated"
+
+                    settle_reserved_neurons(account_id, estimated, neurons)
                     _record_image_usage(
-                        path,
-                        "cloudflare",
-                        neurons,
-                        source,
-                        attempt,
+                        path, "cloudflare", neurons, source, attempt,
                         final_prompt=prompt,
                     )
-                    _record_daily_cloudflare_neurons(neurons, source)
-
-                    print(
-                        f"✅ Cloudflare image saved: {path}",
-                        flush=True,
-                    )
-                    print(
-                        f"   📊 Cloudflare neurons for this image: {neurons:.2f} ({source})",
-                        flush=True,
-                    )
-                    print(
-                        f"   📊 Story Cloudflare neurons so far: "
-                        f"{get_usage_summary()['total_cloudflare_neurons']:.2f}",
-                        flush=True,
-                    )
-                    _print_daily_cloudflare_status()
-
-                    return True
-
-                except Exception as e:
-                    print(
-                        "⚠️ Cloudflare returned an invalid image:",
-                        e,
-                        flush=True,
+                    record_image(
+                        account_id, neurons, source,
+                        story_id=story_id, part_no=part_no,
                     )
 
-            else:
-                # Do not print the Authorization header/token.
-                try:
-                    error_data = response.json()
-                except Exception:
-                    error_data = response.text[:1000]
+                    print(
+                        f"✅ Cloudflare account {account_index} SUCCESS; "
+                        f"neurons={neurons:.2f}",
+                        flush=True,
+                    )
+                    account_success = True
+                    break
+                except Exception as exc:
+                    print(
+                        f"⚠️ Cloudflare account {account_index} returned an "
+                        f"invalid/unusable image: {exc}",
+                        flush=True,
+                    )
+                    break
 
+            # --------------------------------------------------------
+            # DEFINITIVE DAILY QUOTA EXHAUSTION
+            # --------------------------------------------------------
+            error_text = json.dumps(error_data, ensure_ascii=False).lower()
+            is_quota_exhausted = (
+                "4006" in error_text
+                or "daily free allocation" in error_text
+                or "used up your daily free allocation" in error_text
+                or "daily allocation" in error_text
+                or ("neurons" in error_text and "used up" in error_text)
+            )
+
+            if response.status_code == 429 or is_quota_exhausted:
                 print(
-                    f"⚠️ Cloudflare API error "
-                    f"(HTTP {response.status_code}): "
-                    f"{error_data}",
+                    f"⚠️ Cloudflare account {account_index} API error "
+                    f"(HTTP {response.status_code}): {error_data}",
                     flush=True,
                 )
 
-        except requests.RequestException as e:
+                if is_quota_exhausted:
+                    quota_exhausted = True
+                    # Undo only this request's reservation, then permanently
+                    # skip this account for the rest of today's UTC bucket.
+                    release_reserved_neurons(account_id, estimated)
+                    reservation_released = True
+
+                    mark_account_exhausted(
+                        account_id,
+                        reason="CLOUDFLARE_429_4006",
+                    )
+
+                    print(
+                        f"🚫 Account {account_index} exhausted for UTC "
+                        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}; "
+                        "moving immediately to next account.",
+                        flush=True,
+                    )
+                    break
+
+                # Other 429/rate limiting: try the next account rather than
+                # repeatedly spending time on the same account.
+                print(
+                    f"🔁 Account {account_index} returned non-quota 429; "
+                    "moving to next account.",
+                    flush=True,
+                )
+                break
+
+            # --------------------------------------------------------
+            # OTHER ACCOUNT-LEVEL ERRORS
+            # --------------------------------------------------------
             print(
-                "⚠️ Cloudflare request failed:",
-                e,
+                f"⚠️ Cloudflare account {account_index} API error "
+                f"(HTTP {response.status_code}): {error_data}",
                 flush=True,
             )
 
-        if attempt < CLOUDFLARE_RETRIES:
-            time.sleep(2)
+            if response.status_code in (400, 401, 403, 500, 502, 503, 504):
+                break
 
-    return False
+            if attempt < CLOUDFLARE_RETRIES:
+                time.sleep(2)
+
+        if account_success:
+            return True
+
+        if not reservation_released:
+            release_reserved_neurons(account_id, estimated)
+
+        if quota_exhausted:
+            print(
+                f"➡️ Quota-exhausted account {account_index} will NOT be "
+                "called again today. Checking next account.",
+                flush=True,
+            )
+        else:
+            print(
+                f"➡️ Cloudflare account {account_index} failed; "
+                "checking next configured account.",
+                flush=True,
+            )
+
+        # Continue until choose_account() has no remaining eligible accounts.
 
 
 def _generate_pollinations(prompt, path):
@@ -572,6 +559,8 @@ def generate_image(
     prompt,
     path,
     fallback_text=None,
+    story_id=None,
+    part_no=None,
 ):
     """
     Generate a scene image.
@@ -585,35 +574,15 @@ def generate_image(
     """
 
     # --------------------------------------------------------
-    # 1. DAILY NEURON THRESHOLD ROUTING
+    # 1. MULTI-ACCOUNT CLOUDFLARE ROUTING
     # --------------------------------------------------------
 
-    print("📝 FINAL IMAGE PROMPT:", flush=True)
-    print(f"   {prompt}", flush=True)
-
-    daily_status = _print_daily_cloudflare_status(
-        "📅 Before image provider selection"
+    if _generate_cloudflare(prompt, path, story_id=story_id, part_no=part_no):
+        return path
+    print(
+        "⚠️ Cloudflare accounts unavailable/failed; switching to Pollinations fallback...",
+        flush=True,
     )
-
-    if daily_status["cloudflare_neurons_remaining"] > CLOUDFLARE_POLLINATIONS_THRESHOLD:
-        print(
-            f"☁️ Remaining neurons {daily_status['cloudflare_neurons_remaining']:.2f} "
-            f"> {CLOUDFLARE_POLLINATIONS_THRESHOLD:.2f}; trying Cloudflare.",
-            flush=True,
-        )
-        if _generate_cloudflare(prompt, path):
-            return path
-        print(
-            "⚠️ Cloudflare failed; switching to Pollinations fallback...",
-            flush=True,
-        )
-    else:
-        print(
-            f"🔄 Remaining neurons {daily_status['cloudflare_neurons_remaining']:.2f} "
-            f"<= {CLOUDFLARE_POLLINATIONS_THRESHOLD:.2f}; "
-            "skipping Cloudflare and using Pollinations.",
-            flush=True,
-        )
 
     # --------------------------------------------------------
     # 2. POLLINATIONS AI FALLBACK
