@@ -10,7 +10,7 @@ from .scene import create_scene
 from .end_card import create_end_card
 
 
-def build_part_video(scenes, title, part_no, part_title=None, story_id=None):
+def build_part_video(scenes, title, part_no, part_title=None):
     """Build exactly one video from the scenes belonging to one part."""
     clips = []
     transition_duration = 0.40
@@ -42,7 +42,6 @@ def build_part_video(scenes, title, part_no, part_title=None, story_id=None):
                 scene,
                 i,
                 part_no=part_no,
-                story_id=story_id,
             )
             if clip is None:
                 raise ValueError(

@@ -13,15 +13,19 @@ from PIL import Image, ImageDraw
 
 from .config import VIDEO_SIZE
 from .fonts import get_unicode_font
-from .cloudflare_accounts import choose_account, adjust_neurons, release_reserved_neurons, record_image, NEURON_SWITCH_THRESHOLD
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+CLOUDFLARE_ACCOUNT_ID = os.getenv(
+    "CLOUDFLARE_ACCOUNT_ID", ""
+).strip()
+
+CLOUDFLARE_API_TOKEN = os.getenv(
+    "CLOUDFLARE_API_TOKEN", ""
+).strip()
 
 CLOUDFLARE_MODEL = os.getenv(
     "CLOUDFLARE_IMAGE_MODEL",
@@ -363,71 +367,127 @@ def _log_final_api_prompt(prompt, provider="cloudflare"):
     return path
 
 
-def _generate_cloudflare(prompt, path, story_id=None, part_no=None):
-    """Generate with a MongoDB-selected Cloudflare account under the daily threshold."""
-    estimated = _estimated_cloudflare_neurons()
-    account = choose_account(estimated)
-    if not account:
+def _generate_cloudflare(prompt, path):
+    """Generate an image using Cloudflare Workers AI."""
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         print(
-            f"🔄 No Cloudflare account has <= {NEURON_SWITCH_THRESHOLD:.0f} daily neurons available; "
-            "using Pollinations fallback.", flush=True
+            "ℹ️ Cloudflare credentials are not configured; "
+            "skipping to Pollinations fallback.",
+            flush=True,
         )
         return False
 
-    account_id = account["account_id"]
-    token = account["token"]
     api_url = (
         "https://api.cloudflare.com/client/v4/accounts/"
-        f"{account_id}/ai/run/{CLOUDFLARE_MODEL}"
+        f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/"
+        f"{CLOUDFLARE_MODEL}"
     )
-    payload = {"prompt": prompt, "steps": CLOUDFLARE_STEPS}
-    prompt_log_path = _log_final_api_prompt(prompt, provider=f"cloudflare_account_{account['index']}")
-    print(f"📝 Final Cloudflare API prompt logged: {prompt_log_path}", flush=True)
-    print(f"📝 FINAL IMAGE PROMPT SENT TO CLOUDFLARE ACCOUNT {account['index']}:", flush=True)
+
+    payload = {
+        "prompt": prompt,
+        "steps": CLOUDFLARE_STEPS,
+    }
+
+    prompt_log_path = _log_final_api_prompt(prompt, provider="cloudflare")
+    print(
+        f"📝 Final Cloudflare API prompt logged: {prompt_log_path}",
+        flush=True,
+    )
+    print("📝 FINAL IMAGE PROMPT SENT TO CLOUDFLARE:", flush=True)
     print(f"   {prompt}", flush=True)
-    print(f"☁️ Using Cloudflare account slot {account['index']} ({account_id})", flush=True)
 
     for attempt in range(1, CLOUDFLARE_RETRIES + 1):
         _USAGE["cloudflare_attempts"] += 1
         try:
+            print(
+                f"☁️ Cloudflare image attempt "
+                f"{attempt}/{CLOUDFLARE_RETRIES}",
+                flush=True,
+            )
+
             response = requests.post(
                 api_url,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": (
+                        f"Bearer {CLOUDFLARE_API_TOKEN}"
+                    ),
+                    "Content-Type": "application/json",
+                },
                 json=payload,
                 timeout=CLOUDFLARE_TIMEOUT,
             )
+
             if response.status_code == 200:
                 try:
                     _save_cloudflare_image(response, path)
                     response_data = response.json()
                     reported = _extract_reported_neurons(response_data)
-                    neurons = reported if reported is not None else estimated
+                    neurons = (
+                        reported
+                        if reported is not None
+                        else _estimated_cloudflare_neurons()
+                    )
                     source = "reported" if reported is not None else "estimated"
-                    if reported is not None:
-                        adjust_neurons(account_id, estimated, reported)
-                    _record_image_usage(path, "cloudflare", neurons, source, attempt, final_prompt=prompt)
-                    record_image(account_id, neurons, source, story_id=story_id, part_no=part_no)
-                    print(f"✅ Cloudflare image saved: {path}", flush=True)
-                    print(f"   📊 Account {account['index']} neurons for this image: {neurons:.2f} ({source})", flush=True)
-                    print(f"   📊 Story Cloudflare neurons so far: {get_usage_summary()['total_cloudflare_neurons']:.2f}", flush=True)
+                    _record_image_usage(
+                        path,
+                        "cloudflare",
+                        neurons,
+                        source,
+                        attempt,
+                        final_prompt=prompt,
+                    )
+                    _record_daily_cloudflare_neurons(neurons, source)
+
+                    print(
+                        f"✅ Cloudflare image saved: {path}",
+                        flush=True,
+                    )
+                    print(
+                        f"   📊 Cloudflare neurons for this image: {neurons:.2f} ({source})",
+                        flush=True,
+                    )
+                    print(
+                        f"   📊 Story Cloudflare neurons so far: "
+                        f"{get_usage_summary()['total_cloudflare_neurons']:.2f}",
+                        flush=True,
+                    )
+                    _print_daily_cloudflare_status()
+
                     return True
+
                 except Exception as e:
-                    print(f"⚠️ Cloudflare returned an invalid image: {e}", flush=True)
+                    print(
+                        "⚠️ Cloudflare returned an invalid image:",
+                        e,
+                        flush=True,
+                    )
+
             else:
+                # Do not print the Authorization header/token.
                 try:
                     error_data = response.json()
                 except Exception:
                     error_data = response.text[:1000]
-                print(f"⚠️ Cloudflare account {account['index']} API error (HTTP {response.status_code}): {error_data}", flush=True)
-                # Try another configured account immediately for quota/auth/rate-limit errors.
-                if response.status_code in (401, 403, 429, 500, 502, 503, 504):
-                    break
+
+                print(
+                    f"⚠️ Cloudflare API error "
+                    f"(HTTP {response.status_code}): "
+                    f"{error_data}",
+                    flush=True,
+                )
+
         except requests.RequestException as e:
-            print(f"⚠️ Cloudflare account {account['index']} request failed: {e}", flush=True)
+            print(
+                "⚠️ Cloudflare request failed:",
+                e,
+                flush=True,
+            )
+
         if attempt < CLOUDFLARE_RETRIES:
             time.sleep(2)
-    release_reserved_neurons(account_id, estimated)
+
     return False
+
 
 def _generate_pollinations(prompt, path):
     """Generate an image using Pollinations as the AI fallback."""
@@ -512,8 +572,6 @@ def generate_image(
     prompt,
     path,
     fallback_text=None,
-    story_id=None,
-    part_no=None,
 ):
     """
     Generate a scene image.
@@ -527,15 +585,35 @@ def generate_image(
     """
 
     # --------------------------------------------------------
-    # 1. MULTI-ACCOUNT CLOUDFLARE ROUTING
+    # 1. DAILY NEURON THRESHOLD ROUTING
     # --------------------------------------------------------
 
-    if _generate_cloudflare(prompt, path, story_id=story_id, part_no=part_no):
-        return path
-    print(
-        "⚠️ Cloudflare accounts unavailable/failed; switching to Pollinations fallback...",
-        flush=True,
+    print("📝 FINAL IMAGE PROMPT:", flush=True)
+    print(f"   {prompt}", flush=True)
+
+    daily_status = _print_daily_cloudflare_status(
+        "📅 Before image provider selection"
     )
+
+    if daily_status["cloudflare_neurons_remaining"] > CLOUDFLARE_POLLINATIONS_THRESHOLD:
+        print(
+            f"☁️ Remaining neurons {daily_status['cloudflare_neurons_remaining']:.2f} "
+            f"> {CLOUDFLARE_POLLINATIONS_THRESHOLD:.2f}; trying Cloudflare.",
+            flush=True,
+        )
+        if _generate_cloudflare(prompt, path):
+            return path
+        print(
+            "⚠️ Cloudflare failed; switching to Pollinations fallback...",
+            flush=True,
+        )
+    else:
+        print(
+            f"🔄 Remaining neurons {daily_status['cloudflare_neurons_remaining']:.2f} "
+            f"<= {CLOUDFLARE_POLLINATIONS_THRESHOLD:.2f}; "
+            "skipping Cloudflare and using Pollinations.",
+            flush=True,
+        )
 
     # --------------------------------------------------------
     # 2. POLLINATIONS AI FALLBACK

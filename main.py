@@ -1,11 +1,15 @@
-"""Sequential suspense-story video generator with Facebook + Instagram publishing."""
+"""Resumable suspense-story generator: one unfinished part per GitHub Actions run."""
 import os
 import sys
 from datetime import datetime, timezone
 
-from smart_video.db import get_story_from_mongodb, update_part_status, update_story_status
+from smart_video.db import (
+    get_story_from_mongodb,
+    update_part_status,
+    update_story_status,
+)
 from smart_video.video_builder import build_part_video
-from smart_video.image_generator import start_story_usage, save_usage_report, get_usage_summary
+from smart_video.image_generator import start_story_usage, save_usage_report
 from facebook_upload import upload_video
 from instagram_service import publish_video_to_instagram
 
@@ -31,102 +35,102 @@ def build_instagram_caption(title, part_no, part_title):
     ).strip()
 
 
-def _mark_part_failed(story, part_no, error, video_path=None,
-                      facebook_status="FAILED", instagram_status="FAILED", neuron_fields=None):
+def _mark_part_pending(story, part_no, error, video_path=None,
+                       facebook_status=None, facebook_video_id=None,
+                       instagram_status=None, instagram_media_id=None):
     fields = {
-        "error": str(error),
+        "error": str(error) if error else None,
         "video_path": video_path,
-        "facebook_status": facebook_status,
-        "instagram_status": instagram_status,
-        "failed_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
     }
-    if neuron_fields:
-        fields.update(neuron_fields)
-    update_part_status(
-        story, part_no, "FAILED",
-        fields,
-    )
+    if facebook_status is not None:
+        fields["facebook_status"] = facebook_status
+    if facebook_video_id is not None:
+        fields["facebook_video_id"] = facebook_video_id
+    if instagram_status is not None:
+        fields["instagram_status"] = instagram_status
+    if instagram_media_id is not None:
+        fields["instagram_media_id"] = instagram_media_id
+    update_part_status(story, part_no, "PENDING", fields)
 
 
-def _part_neuron_totals(before, after):
-    before_total = float(before.get("total_cloudflare_neurons", 0.0) or 0.0)
-    after_total = float(after.get("total_cloudflare_neurons", 0.0) or 0.0)
-    before_est = float(before.get("estimated_cloudflare_neurons", 0.0) or 0.0)
-    after_est = float(after.get("estimated_cloudflare_neurons", 0.0) or 0.0)
-    before_rep = float(before.get("reported_cloudflare_neurons", 0.0) or 0.0)
-    after_rep = float(after.get("reported_cloudflare_neurons", 0.0) or 0.0)
-    return {
-        "cloudflare_neurons_used": round(max(0.0, after_total - before_total), 2),
-        "estimated_cloudflare_neurons": round(max(0.0, after_est - before_est), 2),
-        "reported_cloudflare_neurons": round(max(0.0, after_rep - before_rep), 2),
-    }
+def _is_posted(value):
+    return str(value or "").upper() == "POSTED"
 
 
 def main():
     print("🚀 Starting Smart Learning Lab suspense-story generator...", flush=True)
     story = None
-    successful_parts = failed_parts = 0
 
     try:
-        story, parts = get_story_from_mongodb()
+        story, selected_parts = get_story_from_mongodb()
         if not story:
-            print("ℹ️ No PENDING suspense story was found.", flush=True)
-            return 2
+            print("ℹ️ No PROCESSING or PENDING suspense story was found.", flush=True)
+            return 0
 
+        if not selected_parts:
+            print("⚠️ Selected story has no unfinished part in this run.", flush=True)
+            return 0
+
+        # Exactly ONE part per GitHub Actions run.
+        part = selected_parts[0]
         story_id = story.get("story_id") or story.get("id") or story.get("ID") or "unknown"
         title = str(story.get("title") or "Untitled Suspense Story").strip()
+        part_no = int(part["part_no"])
+        part_title = str(part.get("part_title") or f"भाग {part_no}").strip()
+        scenes = part.get("scenes") or []
 
-        print("=" * 60)
-        print(f"🆔 Story ID : {story_id}")
-        print(f"📖 Title   : {title}")
-        print(f"🧩 Parts   : {len(parts)}")
-        print("=" * 60)
+        print("=" * 60, flush=True)
+        print(f"🆔 Story ID : {story_id}", flush=True)
+        print(f"📖 Title   : {title}", flush=True)
+        print(f"🧩 Total parts in story: {len(story.get('parts') or [])}", flush=True)
+        print(f"▶️ Selected part: {part_no}", flush=True)
+        print(f"🎬 Scene count: {len(scenes)}", flush=True)
+        print("=" * 60, flush=True)
+
+        if not scenes:
+            # No fixed count is required, but a part must contain something to render.
+            error = f"Part {part_no} contains no scenes; nothing can be rendered."
+            print(f"⚠️ {error}", flush=True)
+            _mark_part_pending(story, part_no, error)
+            update_story_status(story, "PROCESSING", {"last_error": error})
+            return 0
 
         export_story_to_github_actions(story_id, title)
         start_story_usage(story_id=story_id, story_title=title)
 
-        for part in parts:
-            if str(part.get("status", "PENDING")).upper() != "PENDING":
-                print(f"⏭️ Skipping Part {part.get('part_no')}: status={part.get('status')}", flush=True)
-                continue
-            part_no = int(part["part_no"])
-            part_title = str(part.get("part_title") or f"भाग {part_no}").strip()
-            scenes = part.get("scenes") or []
+        update_part_status(
+            story,
+            part_no,
+            "PROCESSING",
+            {
+                "error": None,
+                "started_at": datetime.now(timezone.utc),
+            },
+        )
 
-            print("\n" + "=" * 60)
-            print(f"▶️ START PART {part_no}: {part_title}")
-            print(f"🎬 Scenes: {len(scenes)}")
-            print("=" * 60)
+        # Read the current platform statuses after the status update. Existing
+        # POSTED platforms must never be posted again on a retry.
+        result = (story.get("part_results") or {}).get(f"part_{part_no:02d}") or {}
+        fb_status = str(result.get("facebook_status") or "PENDING").upper()
+        ig_status = str(result.get("instagram_status") or "PENDING").upper()
+        fb_id = result.get("facebook_video_id")
+        ig_id = result.get("instagram_media_id")
+        video_path = None
 
-            part_usage_before = get_usage_summary()
-            update_part_status(
-                story, part_no, "PROCESSING",
-                {
-                    "error": None,
-                    "started_at": datetime.now(timezone.utc),
-                    "facebook_status": "PROCESSING",
-                    "instagram_status": "PROCESSING",
-                },
+        try:
+            # Video is built for this part only. Part/scene counts are dynamic.
+            video_path = build_part_video(
+                scenes=scenes,
+                title=title,
+                part_no=part_no,
+                part_title=part_title,
             )
 
-            if len(scenes) != 10:
-                error = f"Part {part_no} must contain exactly 10 scenes; found {len(scenes)}"
-                _mark_part_failed(story, part_no, error)
-                failed_parts += 1
-                continue
-
-            video_path = None
-            fb_id = None
-            ig_id = None
-            fb_status = "FAILED"
-            ig_status = "FAILED"
-
-            try:
-                video_path = build_part_video(
-                    scenes=scenes, title=title, part_no=part_no, part_title=part_title, story_id=story_id
-                )
-
-                # Publish to Facebook first.
+            # ------------------------------------------------------------
+            # Facebook: only if not already POSTED.
+            # ------------------------------------------------------------
+            if not _is_posted(fb_status):
                 try:
                     print(f"📘 Publishing Part {part_no} to Facebook...", flush=True)
                     fb_id = upload_video(
@@ -139,71 +143,92 @@ def main():
                     fb_status = "POSTED" if fb_id else "FAILED"
                     print(f"📘 Facebook: {fb_status}", flush=True)
                 except Exception as exc:
-                    print(f"❌ Facebook publish failed: {exc}", flush=True)
                     fb_status = "FAILED"
+                    print(f"❌ Facebook publish failed: {exc}", flush=True)
+            else:
+                print(f"⏭️ Facebook already POSTED; skipping Part {part_no}.", flush=True)
 
-                # Publish the same finished MP4 as an Instagram Reel.
+            update_part_status(
+                story, part_no, "PROCESSING",
+                {
+                    "video_path": video_path,
+                    "facebook_status": fb_status,
+                    "facebook_video_id": fb_id,
+                },
+            )
+
+            # ------------------------------------------------------------
+            # Instagram: only if not already POSTED.
+            # ------------------------------------------------------------
+            if not _is_posted(ig_status):
                 try:
                     ig_account = os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", "").strip()
                     ig_token = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
                     if not ig_account or not ig_token:
-                        print("⚠️ Instagram credentials not configured; skipping.", flush=True)
-                        ig_status = "SKIPPED"
+                        ig_status = "FAILED"
+                        print("⚠️ Instagram credentials not configured.", flush=True)
                     else:
                         print(f"📸 Publishing Part {part_no} to Instagram Reel...", flush=True)
                         ig_result = publish_video_to_instagram(
                             video_path,
                             build_instagram_caption(title, part_no, part_title),
                         )
-                        ig_id = (ig_result or {}).get("id") if isinstance(ig_result, dict) else ig_result
-                        ig_status = "POSTED" if ig_id else "SKIPPED"
+                        ig_id = ((ig_result or {}).get("id")
+                                 if isinstance(ig_result, dict) else ig_result)
+                        ig_status = "POSTED" if ig_id else "FAILED"
+                        print(f"📸 Instagram: {ig_status}", flush=True)
                 except Exception as exc:
-                    print(f"❌ Instagram publish failed: {exc}", flush=True)
                     ig_status = "FAILED"
+                    print(f"❌ Instagram publish failed: {exc}", flush=True)
+            else:
+                print(f"⏭️ Instagram already POSTED; skipping Part {part_no}.", flush=True)
 
-                if fb_status == "POSTED" or ig_status == "POSTED":
-                    part_usage_after = get_usage_summary()
-                    part_neurons = _part_neuron_totals(part_usage_before, part_usage_after)
-                    print(
-                        f"📊 PART {part_no} Cloudflare neurons used: "
-                        f"{part_neurons['cloudflare_neurons_used']:.2f}", flush=True
-                    )
-                    update_part_status(
-                        story, part_no, "SUCCESS",
-                        {
-                            "video_path": video_path,
-                            "facebook_status": fb_status,
-                            "facebook_video_id": fb_id,
-                            "instagram_status": ig_status,
-                            "instagram_media_id": ig_id,
-                            "error": None,
-                            **part_neurons,
-                            "completed_at": datetime.now(timezone.utc),
-                        },
-                    )
-                    for local_part in story.get("parts", []):
-                        if int(local_part.get("part_no", -1)) == part_no:
-                            local_part["status"] = "SUCCESS"
-                            break
-                    successful_parts += 1
-                    print(f"✅ PART {part_no} SUCCESS", flush=True)
-                else:
-                    raise RuntimeError("Video was created but neither Facebook nor Instagram publishing succeeded.")
-
-            except Exception as exc:
-                failed_parts += 1
-                part_usage_after = get_usage_summary()
-                part_neurons = _part_neuron_totals(part_usage_before, part_usage_after)
-                print(f"❌ PART {part_no} FAILED: {exc}", flush=True)
-                for local_part in story.get("parts", []):
-                    if int(local_part.get("part_no", -1)) == part_no:
-                        local_part["status"] = "FAILED"
-                        break
-                _mark_part_failed(
-                    story, part_no, exc, video_path=video_path,
-                    facebook_status=fb_status, instagram_status=ig_status,
-                    neuron_fields=part_neurons,
+            # ------------------------------------------------------------
+            # A part is SUCCESS only when BOTH required platforms are POSTED.
+            # ------------------------------------------------------------
+            if _is_posted(fb_status) and _is_posted(ig_status):
+                update_part_status(
+                    story, part_no, "SUCCESS",
+                    {
+                        "video_path": video_path,
+                        "facebook_status": fb_status,
+                        "facebook_video_id": fb_id,
+                        "instagram_status": ig_status,
+                        "instagram_media_id": ig_id,
+                        "error": None,
+                        "completed_at": datetime.now(timezone.utc),
+                    },
                 )
+                print(f"✅ PART {part_no} SUCCESS — both platforms POSTED", flush=True)
+            else:
+                error = (
+                    f"Part {part_no} incomplete: "
+                    f"Facebook={fb_status}, Instagram={ig_status}. "
+                    "Part remains PENDING for the next run."
+                )
+                print(f"🔄 {error}", flush=True)
+                _mark_part_pending(
+                    story, part_no, error,
+                    video_path=video_path,
+                    facebook_status=fb_status,
+                    facebook_video_id=fb_id,
+                    instagram_status=ig_status,
+                    instagram_media_id=ig_id,
+                )
+
+        except Exception as exc:
+            error = f"Part {part_no} processing failed: {exc}"
+            print(f"❌ {error}", flush=True)
+            _mark_part_pending(
+                story, part_no, error,
+                video_path=video_path,
+                facebook_status=fb_status,
+                facebook_video_id=fb_id,
+                instagram_status=ig_status,
+                instagram_media_id=ig_id,
+            )
+            # Do not mark the whole story FAILED. It is intentionally
+            # recoverable by the next scheduled/manual GitHub Actions run.
 
         report_path, usage = save_usage_report()
         print("\n📊 IMAGE / CLOUDFLARE USAGE", flush=True)
@@ -211,46 +236,39 @@ def main():
         print(f"☁️ Cloudflare successes: {usage['cloudflare_successes']}", flush=True)
         print(f"🔄 Pollinations fallbacks: {usage['pollinations_successes']}", flush=True)
         print(f"🔢 Cloudflare attempts: {usage['cloudflare_attempts']}", flush=True)
-        print(f"🧮 Cloudflare neurons used/estimated: {usage['total_cloudflare_neurons']:.2f}", flush=True)
+        print(f"🧮 Cloudflare neurons: {usage['total_cloudflare_neurons']:.2f}", flush=True)
         print(f"📄 Usage report: {report_path}", flush=True)
 
-        # Re-read the story's part statuses. A story remains PROCESSING while any
-        # part is still PENDING; this allows a later workflow run to pick it up.
-        remaining_pending = 0
-        for p in story.get("parts", []):
-            if str(p.get("status", "PENDING")).upper() == "PENDING":
-                remaining_pending += 1
-
-        if remaining_pending > 0:
-            overall = "PROCESSING"
-        elif failed_parts > 0 and successful_parts > 0:
-            overall = "PARTIAL_SUCCESS"
-        elif failed_parts > 0:
-            overall = "FAILED"
-        else:
-            overall = "COMPLETED"
-        ok = update_story_status(
-            story, overall,
+        # The next run will re-query MongoDB. If this part succeeded, it will
+        # select the next unfinished part of the same PROCESSING story first.
+        update_story_status(
+            story,
+            "PROCESSING",
             {
-                **({"completed_at": datetime.now(timezone.utc)} if overall in ("COMPLETED", "PARTIAL_SUCCESS", "FAILED") else {}),
-                "last_error": None if failed_parts == 0 else f"{failed_parts} part(s) failed.",
                 "image_usage": usage,
                 "usage_report_path": report_path,
+                "updated_at": datetime.now(timezone.utc),
             },
         )
-        if not ok:
-            return 1
 
-        print(f"🏁 SUSPENSE STORY FINISHED: {overall}", flush=True)
-        return 1 if overall == "FAILED" else 0
+        print(
+            f"🏁 RUN FINISHED: story={story_id}, part={part_no}. "
+            "Next run will resume PROCESSING work before taking a new PENDING story.",
+            flush=True,
+        )
+        return 0
 
     except Exception as exc:
         print(f"❌ Suspense-story orchestration failed: {exc}", flush=True)
         if story:
-            update_story_status(story, "FAILED", {
-                "last_error": str(exc),
-                "failed_at": datetime.now(timezone.utc),
-            })
+            update_story_status(
+                story,
+                "PROCESSING",
+                {
+                    "last_error": str(exc),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
         return 1
 
 
