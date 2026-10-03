@@ -1,6 +1,7 @@
 """Scene construction: TTS + images + subtitles."""
 
 import os
+import time
 import numpy as np
 
 from moviepy.editor import (
@@ -10,11 +11,98 @@ from moviepy.editor import (
 )
 from moviepy.audio.AudioClip import AudioArrayClip
 
-from .config import MIN_DURATION, VIDEO_SIZE
+from .config import (
+    MIN_DURATION,
+    VIDEO_SIZE,
+    IMAGE_GENERATION_SLEEP_SECONDS,
+    IMAGE_PROMPT_PREFIX,
+)
 from .voice import clean_tts_text, generate_voice
 from .image_generator import generate_image
 from .branding import create_fullscreen_clip
 from .subtitles import create_subtitle
+
+
+# ============================================================
+# IMAGE PROMPT CONTINUITY / PRIORITY
+# ============================================================
+
+def _build_consistent_image_prompt(
+    scene_text,
+    sub_text,
+    scene_prompt,
+    characters,
+    style,
+    scene_number,
+    prompt_index,
+):
+    """Build a self-contained prompt with the current visual beat first.
+
+    Cloudflare prompts are trimmed to 1800 characters later in the image
+    generator. Therefore the exact sub-image text and scene/image prompt are
+    deliberately placed before lower-priority continuity/context material.
+    """
+    scene_text = str(scene_text or "").strip()
+    sub_text = str(sub_text or "").strip()
+    scene_prompt = str(scene_prompt or "").strip()
+    style = str(style or "").strip()
+
+    parts = []
+
+    if IMAGE_PROMPT_PREFIX:
+        parts.append(IMAGE_PROMPT_PREFIX)
+
+    parts.extend([
+        "Create one standalone cinematic image for this exact sub-image moment.",
+        f"Scene {scene_number}, sub-image {prompt_index}.",
+    ])
+
+    if sub_text:
+        parts.append(f"SUB-IMAGE TEXT: {sub_text}")
+
+    if scene_prompt:
+        parts.append(f"IMAGE PROMPT: {scene_prompt}")
+
+    if style:
+        parts.append(f"STYLE: {style}.")
+
+    character_lines = []
+    if isinstance(characters, dict):
+        for role, details in characters.items():
+            role_name = str(role).strip().upper()
+            if isinstance(details, dict):
+                character_id = str(details.get("id", "")).strip()
+                name = str(details.get("name", role_name)).strip()
+                description = str(details.get("description", "")).strip()
+                if character_id or description:
+                    character_lines.append(
+                        f"{role_name} CHARACTER ID: {character_id} — "
+                        f"always use the same {name} character. "
+                        f"CHARACTER: {description}"
+                    )
+            elif isinstance(details, str) and details.strip():
+                character_lines.append(
+                    f"{role_name} CHARACTER: {details.strip()}"
+                )
+
+    if character_lines:
+        parts.append(
+            "CHARACTER CONTINUITY: Preserve every character's face, age, "
+            "hairstyle, skin tone, body proportions, clothing, accessories "
+            "and identity across scenes. Only change pose, expression and "
+            "action according to the current moment.\n" +
+            "\n".join(character_lines)
+        )
+
+    if scene_text:
+        parts.append(f"BROADER SCENE CONTEXT: {scene_text}")
+
+    parts.append(
+        "FINAL RULES: Show only the current story moment. Maintain location "
+        "and visual continuity. No text, subtitles, captions, logo or watermark."
+    )
+
+    return "\n\n".join(parts)
 
 
 # ============================================================
@@ -467,13 +555,23 @@ def create_scene(
         start=1
     ):
 
-        image_prompt = item.get("scene_prompt") or item.get("image_prompt")
+        base_image_prompt = item.get("scene_prompt") or item.get("image_prompt")
 
-        if not image_prompt:
+        if not base_image_prompt:
             raise ValueError(
                 f"❌ Scene {scene_number}, image "
                 f"{prompt_index} has an empty image_prompt"
             )
+
+        image_prompt = _build_consistent_image_prompt(
+            scene_text=text,
+            sub_text=item.get("text", ""),
+            scene_prompt=base_image_prompt,
+            characters=scene.get("characters", {}),
+            style=scene.get("style", ""),
+            scene_number=scene_number,
+            prompt_index=prompt_index,
+        )
 
         img_path = (
             os.path.join(
@@ -502,6 +600,13 @@ def create_scene(
                 f"for scene {scene_number}, "
                 f"image {prompt_index}"
             )
+
+        if IMAGE_GENERATION_SLEEP_SECONDS > 0:
+            print(
+                f"⏳ Waiting {IMAGE_GENERATION_SLEEP_SECONDS:.1f}s before the next image...",
+                flush=True,
+            )
+            time.sleep(IMAGE_GENERATION_SLEEP_SECONDS)
 
         # ----------------------------------------------------
         # REAL OVERLAP TIMING

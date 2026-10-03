@@ -19,7 +19,6 @@ from .cloudflare_accounts import (
     release_reserved_neurons,
     record_image,
     mark_account_exhausted,
-    NEURON_SWITCH_THRESHOLD,
 )
 
 
@@ -45,6 +44,9 @@ CLOUDFLARE_RETRIES = int(
 CLOUDFLARE_TIMEOUT = int(
     os.getenv("CLOUDFLARE_IMAGE_TIMEOUT", "120")
 )
+
+# Cloudflare accepts prompts up to 2048 characters. Keep a safety margin.
+CLOUDFLARE_MAX_PROMPT_CHARS = int(os.getenv("CLOUDFLARE_MAX_PROMPT_CHARS", "1800"))
 
 POLLINATIONS_RETRIES = int(
     os.getenv("POLLINATIONS_IMAGE_RETRIES", "3")
@@ -267,6 +269,15 @@ def _log_final_api_prompt(prompt, provider="cloudflare"):
     return path
 
 
+
+def _trim_prompt(prompt, max_chars=CLOUDFLARE_MAX_PROMPT_CHARS):
+    """Keep the first N characters exactly; never fail generation because of length."""
+    text = str(prompt or "")
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars], True
+
+
 def _generate_cloudflare(prompt, path, story_id=None, part_no=None):
     """Try every eligible Cloudflare account before returning to Pollinations.
 
@@ -279,6 +290,14 @@ def _generate_cloudflare(prompt, path, story_id=None, part_no=None):
       * If every configured account has been checked/excluded/unavailable,
         return False so generate_image() calls Pollinations.
     """
+    prompt, was_trimmed = _trim_prompt(prompt)
+    if was_trimmed:
+        print(
+            f"✂️ Cloudflare prompt trimmed to {CLOUDFLARE_MAX_PROMPT_CHARS} characters "
+            "(kept the first characters).",
+            flush=True,
+        )
+
     estimated = _estimated_cloudflare_neurons()
     excluded_accounts = set()
     attempts_total = 0
@@ -315,8 +334,7 @@ def _generate_cloudflare(prompt, path, story_id=None, part_no=None):
         print(f"📝 Final Cloudflare API prompt logged: {prompt_log_path}", flush=True)
         print(f"☁️ Trying Cloudflare account {account_index} ({account_id})", flush=True)
         print(
-            f"📊 Account {account_index}: reserved/used={account['neurons_used']:.2f}, "
-            f"threshold={NEURON_SWITCH_THRESHOLD:.2f}",
+            f"📊 Account {account_index}: tracked neurons={account['neurons_used']:.2f}",
             flush=True,
         )
 
@@ -572,6 +590,14 @@ def generate_image(
 
     The rest of the application only needs to call this function.
     """
+
+    prompt, was_trimmed = _trim_prompt(prompt)
+    if was_trimmed:
+        print(
+            f"✂️ Image prompt trimmed to {CLOUDFLARE_MAX_PROMPT_CHARS} characters "
+            "before provider selection.",
+            flush=True,
+        )
 
     # --------------------------------------------------------
     # 1. MULTI-ACCOUNT CLOUDFLARE ROUTING

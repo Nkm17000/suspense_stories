@@ -25,3 +25,12 @@ MONGODB_SERVER_TIMEOUT_MS = int(os.getenv("MONGODB_SERVER_TIMEOUT_MS", "10000"))
 os.makedirs("images", exist_ok=True)
 os.makedirs("audio", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
+
+# Pause after each completed image generation.
+IMAGE_GENERATION_SLEEP_SECONDS = max(0.0, float(os.getenv("IMAGE_GENERATION_SLEEP_SECONDS", "5")))
+
+# Optional fixed prefix added to every image-generation prompt.
+IMAGE_PROMPT_PREFIX = os.getenv(
+    "IMAGE_PROMPT_PREFIX",
+    "Do not depict real people or photorealistic humans."
+).strip()
