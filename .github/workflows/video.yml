@@ -9,7 +9,7 @@ on:
 
   schedule:
     # Every 2 hours, every day.
-    - cron: "0 */3 * * *"
+    - cron: "0 23 * * *"
 
 jobs:
   build:
